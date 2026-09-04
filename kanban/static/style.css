@@ -77,6 +77,18 @@ body {
   font-family: monospace;
   white-space: nowrap;
 }
+.status-info {
+  font-size: 12px;
+  color: var(--text-soft);
+  background: var(--bg);
+  padding: 3px 8px;
+  border-radius: 12px;
+  font-family: monospace;
+  white-space: nowrap;
+}
+.status-info.synced { color: #3B6D11; background: #EAF3DE; }
+.status-info.diverged { color: #854F0B; background: #FAEEDA; }
+.status-info.unknown { color: #993556; background: #FBEAF0; }
 .sync-btn {
   border: 1px solid var(--primary);
   background: #fff;

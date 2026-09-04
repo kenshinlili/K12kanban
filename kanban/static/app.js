@@ -51,12 +51,14 @@ function todayStr() {
 
 /* ---------- 数据 ---------- */
 async function loadState() {
-  const [d, v] = await Promise.all([
+  const [d, v, s] = await Promise.all([
     get(`/state?date=${STATE.date}&member=${STATE.member}`),
-    get('/version').catch(() => ({ ok: false }))
+    get('/version').catch(() => ({ ok: false })),
+    get('/status').catch(() => ({ ok: false }))
   ]);
   if (d.ok) STATE.data = d;
   if (v.ok && v.version) STATE.version = v.version;
+  if (s.ok && s.status) STATE.status = s;
   render();
 }
 async function loadCheckin(cid) {
@@ -98,6 +100,26 @@ function renderMembers() {
     verEl.textContent = 'v' + STATE.version.short;
     verEl.style.display = '';
   }
+  renderStatus();
+}
+
+function renderStatus() {
+  const el = document.getElementById('statusInfo');
+  if (!el || !STATE.status) return;
+  const s = STATE.status;
+  const cloud = s.cloud && s.cloud.short ? s.cloud.short : '?';
+  const github = s.github && s.github.short ? s.github.short : '?';
+  if (s.status === 'synced') {
+    el.textContent = `云端=${cloud} 已对齐 GitHub=${github}`;
+    el.className = 'status-info synced';
+  } else if (s.status === 'diverged') {
+    el.textContent = `云端=${cloud} ≠ GitHub=${github}`;
+    el.className = 'status-info diverged';
+  } else {
+    el.textContent = '版本状态未知';
+    el.className = 'status-info unknown';
+  }
+  el.style.display = '';
 }
 
 function renderKanban() {
@@ -1262,13 +1284,26 @@ document.addEventListener('DOMContentLoaded', () => {
   const syncBtn = document.getElementById('syncBtn');
   if (syncBtn) {
     syncBtn.onclick = async () => {
+      // 先拉一次最新状态，避免在 GitHub 已落后的情况下误点 sync 导致回退
+      const s = await get('/status').catch(() => ({ ok: false }));
+      if (s && s.ok) {
+        STATE.status = s;
+        renderStatus();
+        if (s.status === 'synced') {
+          alert('当前云端版本已和 GitHub 对齐，无需同步。');
+          return;
+        }
+        if (!s.can_sync && s.warning) {
+          alert('同步被阻止：' + s.warning);
+          return;
+        }
+      }
       if (!confirm('确认从 GitHub 拉取最新代码并重启看板？\n（重启期间约 10–30 秒不可用，刷新即可）')) return;
       syncBtn.disabled = true;
       syncBtn.textContent = '同步中…';
       try {
         const r = await post('/sync', { member: STATE.member });
         if (r && r.ok) {
-          alert('已触发同步，后台拉取最新代码并重启。\n页面会自动检测新版本，检测到后提示刷新。');
           pollVersion(r.old_version || null);
         } else {
           alert('同步失败：' + ((r && r.error) || '未知错误'));
@@ -1289,14 +1324,33 @@ document.addEventListener('DOMContentLoaded', () => {
     const maxAttempts = 40; // 最多 40 次 × 3 秒 ≈ 2 分钟
     const interval = setInterval(async () => {
       attempts++;
+      const syncBtn = document.getElementById('syncBtn');
       try {
-        const v = await get('/version');
-        if (v && v.ok && v.version && v.version.commit) {
-          if (oldCommit && v.version.commit !== oldCommit) {
+        const s = await get('/status');
+        if (s && s.ok) {
+          STATE.status = s;
+          renderStatus();
+          const cloudCommit = s.cloud && s.cloud.commit ? s.cloud.commit : null;
+          // 检测到云端版本已与 GitHub 对齐，即视为同步成功
+          if (s.status === 'synced') {
             clearInterval(interval);
-            if (confirm('看板已更新到新版（' + v.version.short + '），立即刷新？')) {
+            if (syncBtn) {
+              syncBtn.disabled = false;
+              syncBtn.textContent = '⟳ 同步最新版';
+            }
+            if (confirm('看板已更新到新版（' + (s.cloud && s.cloud.short || '?') + '），立即刷新？')) {
               location.reload();
             }
+            return;
+          }
+          // 云端版本发生变化但仍未对齐 GitHub：可能是 GitHub 没有更新
+          if (oldCommit && cloudCommit && cloudCommit !== oldCommit) {
+            clearInterval(interval);
+            if (syncBtn) {
+              syncBtn.disabled = false;
+              syncBtn.textContent = '⟳ 同步最新版';
+            }
+            alert('云端已重启，但版本与 GitHub 仍未对齐：\n云端 ' + (s.cloud && s.cloud.short || '?') + ' / GitHub ' + (s.github && s.github.short || '?') + '\n请检查 GitHub 是否已 push 最新代码。');
             return;
           }
         }
@@ -1305,7 +1359,11 @@ document.addEventListener('DOMContentLoaded', () => {
       }
       if (attempts >= maxAttempts) {
         clearInterval(interval);
-        alert('同步时间较长，请稍后手动刷新页面查看最新版本。');
+        if (syncBtn) {
+          syncBtn.disabled = false;
+          syncBtn.textContent = '⟳ 同步最新版';
+        }
+        alert('同步等待超时。请稍后手动刷新页面，若仍未对齐请检查 GitHub 版本。');
       }
     }, 3000);
   }

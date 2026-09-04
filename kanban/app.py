@@ -314,10 +314,69 @@ def api_backup():
     return resp
 
 
+# GitHub 状态缓存，避免前端轮询时频繁请求 API（30 秒）
+_GITHUB_STATUS_CACHE = (0, None)
+
+
+def fetch_github_head(repo='kenshinlili/K12kanban', branch='master'):
+    """查询 GitHub 指定分支最新 commit，带 30 秒本地缓存。"""
+    global _GITHUB_STATUS_CACHE
+    now = time.time()
+    if now - _GITHUB_STATUS_CACHE[0] < 30 and _GITHUB_STATUS_CACHE[1] is not None:
+        return _GITHUB_STATUS_CACHE[1]
+    url = f'https://api.github.com/repos/{repo}/commits/{branch}'
+    try:
+        with urllib.request.urlopen(url, timeout=10) as resp:
+            data = json.loads(resp.read().decode('utf-8'))
+            result = {
+                'commit': data.get('sha', 'unknown'),
+                'short': (data.get('sha') or 'unknown')[:12],
+                'branch': branch,
+            }
+            _GITHUB_STATUS_CACHE = (now, result)
+            return result
+    except Exception as e:
+        result = {'commit': 'unknown', 'short': 'unknown', 'branch': branch, 'error': str(e)}
+        _GITHUB_STATUS_CACHE = (now, result)
+        return result
+
+
 @app.route('/api/version')
 def api_version():
     """返回当前运行的版本信息，用于确认云端代码是否与 GitHub 一致。"""
     return jsonify({'ok': True, 'version': VERSION})
+
+
+@app.route('/api/status')
+def api_status():
+    """返回云端版本与 GitHub 最新版本的对齐状态，用于判断是否需要 sync。"""
+    gh = fetch_github_head()
+    cloud_commit = VERSION.get('commit', 'unknown')
+    gh_commit = gh.get('commit', 'unknown')
+    cloud_short = cloud_commit[:12] if cloud_commit != 'unknown' else 'unknown'
+    gh_short = gh_commit[:12] if gh_commit != 'unknown' else 'unknown'
+
+    if cloud_commit == 'unknown' or gh_commit == 'unknown':
+        status = 'unknown'
+        can_sync = False
+        warning = '无法获取版本信息'
+    elif cloud_short == gh_short:
+        status = 'synced'
+        can_sync = False
+        warning = ''
+    else:
+        status = 'diverged'
+        can_sync = True
+        warning = ''
+
+    return jsonify({
+        'ok': True,
+        'cloud': {'commit': cloud_commit, 'short': cloud_short},
+        'github': gh,
+        'status': status,          # synced / diverged / unknown
+        'can_sync': can_sync,
+        'warning': warning,
+    })
 
 
 @app.route('/api/sync', methods=['POST'])
@@ -370,6 +429,20 @@ def api_sync():
                     if f == '.gitkeep':
                         continue
                     shutil.copy2(os.path.join(root, f), os.path.join(target_root, f))
+            # 同步成功后立即更新 version.json 为 GitHub HEAD commit，
+            # 确保重启后 /api/version 与 /api/status 能正确对齐
+            try:
+                gh_head = fetch_github_head(repo, branch)
+                if gh_head.get('commit') and gh_head['commit'] != 'unknown':
+                    with open(os.path.join(BASE_DIR, 'version.json'), 'w', encoding='utf-8') as _vf:
+                        json.dump({
+                            'commit': gh_head['commit'],
+                            'short': gh_head['short'],
+                            'branch': branch,
+                            'built_at': datetime.now().isoformat(timespec='seconds'),
+                        }, _vf, ensure_ascii=False, indent=2)
+            except Exception:
+                pass
         except Exception:
             # 覆盖失败：保持当前服务存活，绝不自杀
             return
