@@ -269,23 +269,29 @@ def api_state():
 @app.route('/api/backup')
 def api_backup():
     """打包数据库与上传照片为 zip，供 WorkBuddy 自动化每日拉取备份。"""
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
-        db_path = os.path.join(DATA_DIR, 'kanban.db')
-        if os.path.exists(db_path):
-            zf.write(db_path, 'data/kanban.db')
-        for fname in os.listdir(UPLOAD_DIR):
-            fpath = os.path.join(UPLOAD_DIR, fname)
-            if os.path.isfile(fpath):
-                zf.write(fpath, os.path.join('uploads', fname))
-    buf.seek(0)
+    import tempfile
+    tmp = tempfile.NamedTemporaryFile(suffix='.zip', delete=False)
+    tmp_path = tmp.name
+    try:
+        with zipfile.ZipFile(tmp, 'w', zipfile.ZIP_DEFLATED) as zf:
+            db_path = os.path.join(DATA_DIR, 'kanban.db')
+            if os.path.exists(db_path):
+                zf.write(db_path, 'data/kanban.db')
+            for fname in os.listdir(UPLOAD_DIR):
+                fpath = os.path.join(UPLOAD_DIR, fname)
+                if os.path.isfile(fpath):
+                    zf.write(fpath, os.path.join('uploads', fname))
+    finally:
+        tmp.close()
     ts = datetime.now().strftime('%Y%m%d-%H%M%S')
-    return send_file(
-        buf,
+    resp = send_file(
+        tmp_path,
         mimetype='application/zip',
         as_attachment=True,
         download_name=f'kanban-backup-{ts}.zip'
     )
+    resp.call_on_close(lambda: os.remove(tmp_path) if os.path.exists(tmp_path) else None)
+    return resp
 
 
 # ---------------- 打卡 ----------------
