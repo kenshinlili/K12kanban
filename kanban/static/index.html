@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>李迦一 · 学习看板</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="topbar-left">
+    <h1>📚 李迦一 · 学习看板</h1>
+    <div class="date-nav">
+      <button class="date-btn" id="datePrev" title="前一日">‹</button>
+      <input type="date" id="datePicker" class="date-input">
+      <button class="date-btn" id="dateNext" title="后一日">›</button>
+      <button class="date-btn-today" id="dateToday">今天</button>
+    </div>
+  </div>
+  <div class="topbar-right">
+    <div class="member-switch" id="memberSwitch"></div>
+  </div>
+</header>
+
+<nav class="tabs">
+  <button class="tab active" data-view="kanban">📋 今日看板</button>
+  <button class="tab" data-view="todo">🔔 待处理 <span class="badge" id="todoBadge">0</span></button>
+  <button class="tab" data-view="review">🔁 复习 <span class="badge" id="reviewBadge">0</span></button>
+  <button class="tab" data-view="wrongbook">❌ 错题本</button>
+  <button class="tab" data-view="knowledge">🧭 知识点</button>
+</nav>
+
+<main id="app">
+  <!-- 看板视图 -->
+  <section class="view active" id="view-kanban"></section>
+
+  <!-- 待处理视图 -->
+  <section class="view" id="view-todo"></section>
+
+  <!-- 复习视图 -->
+  <section class="view" id="view-review"></section>
+
+  <!-- 错题本视图 -->
+  <section class="view" id="view-wrongbook"></section>
+
+  <!-- 知识点视图 -->
+  <section class="view" id="view-knowledge"></section>
+</main>
+
+<!-- 板块详情抽屉 -->
+<div class="drawer-mask" id="drawerMask"></div>
+<div class="drawer" id="drawer">
+  <div class="drawer-header">
+    <h2 id="drawerTitle"></h2>
+    <button class="icon-btn" id="drawerClose">✕</button>
+  </div>
+  <div class="drawer-body" id="drawerBody"></div>
+</div>
+
+<!-- 提示 -->
+<div class="toast" id="toast"></div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

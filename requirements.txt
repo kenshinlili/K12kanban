@@ -1,0 +1,5 @@
+# K12 学习看板 · 本地运行依赖
+# 安装：pip install -r requirements.txt
+
+Flask>=2.3.0       # Web 框架（自带 werkzeug，无需单独装）
+pypinyin>=0.49.0   # 语文/英语拼音自动标注
