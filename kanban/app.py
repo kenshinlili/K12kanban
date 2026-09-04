@@ -1,5 +1,6 @@
 """李迦一 K12 学习看板 - Flask 服务"""
 import os
+import sys
 import uuid
 import json
 import re
@@ -336,8 +337,9 @@ def api_sync():
     repo_root = os.path.dirname(BASE_DIR)  # kanban-app/
 
     def _do_sync():
-        """后台线程：下载 GitHub zip、覆盖仓库根（跳过 instance/）、退出重启。"""
+        """后台线程：下载 GitHub zip、覆盖仓库根（跳过 instance/），再启动接替进程平滑重启。"""
         import tempfile
+        import subprocess
         tmpdir = tempfile.mkdtemp()
         try:
             zpath = os.path.join(tmpdir, 'repo.zip')
@@ -361,12 +363,22 @@ def api_sync():
                     if f == '.gitkeep':
                         continue
                     shutil.copy2(os.path.join(root, f), os.path.join(target_root, f))
+            # 启动接替进程：延迟绑定端口（KANBAN_DEFER），等本进程退出释放 3000
+            env = dict(os.environ)
+            env['KANBAN_DEFER'] = '3'
+            subprocess.Popen(
+                [sys.executable, os.path.join(BASE_DIR, 'app.py')],
+                env=env, stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                close_fds=True, start_new_session=True,
+            )
+            time.sleep(1)  # 让接替进程进入延迟等待
         except Exception:
-            pass
+            # 覆盖失败：保持当前服务存活，绝不自杀
+            return
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
-        # 延迟退出，由云端守护进程拉起新进程
-        time.sleep(2)
+        # 父进程退出释放端口，接替进程随后绑定 —— 进程平滑重启，不依赖外部守护
         os._exit(0)
 
     threading.Thread(target=_do_sync, daemon=True).start()
@@ -1500,5 +1512,8 @@ def api_review_stats():
 
 if __name__ == '__main__':
     db.init_db()
+    _defer = os.environ.get('KANBAN_DEFER')
+    if _defer:
+        time.sleep(int(_defer))
     port = int(os.environ.get('PORT', 3000))
     app.run(host='0.0.0.0', port=port, debug=False)
