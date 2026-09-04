@@ -85,6 +85,9 @@ function renderMembers() {
   el.querySelectorAll('.member-btn').forEach(b => {
     b.onclick = () => { STATE.member = b.dataset.member; render(); };
   });
+  // 仅家长（爸爸/妈妈）可见「同步最新版」按钮
+  const syncBtn = document.getElementById('syncBtn');
+  if (syncBtn) syncBtn.style.display = (STATE.member === 'dad' || STATE.member === 'mom') ? '' : 'none';
 }
 
 function renderKanban() {
@@ -1244,6 +1247,29 @@ document.addEventListener('DOMContentLoaded', () => {
 
   document.getElementById('drawerClose').onclick = closeDrawer;
   document.getElementById('drawerMask').onclick = closeDrawer;
+
+  // 「同步最新版」按钮：家长触发云端从 GitHub 拉取最新代码并重启
+  const syncBtn = document.getElementById('syncBtn');
+  if (syncBtn) {
+    syncBtn.onclick = async () => {
+      if (!confirm('确认从 GitHub 拉取最新代码并重启看板？\n（重启期间约 10 秒不可用，刷新即可）')) return;
+      syncBtn.disabled = true;
+      syncBtn.textContent = '同步中…';
+      try {
+        const r = await post('/sync', { member: STATE.member });
+        if (r && r.ok) {
+          alert('已触发同步，数秒后自动重启，请刷新页面。');
+        } else {
+          alert('同步失败：' + ((r && r.error) || '未知错误'));
+        }
+      } catch (e) {
+        alert('同步请求异常：' + e);
+      } finally {
+        syncBtn.disabled = false;
+        syncBtn.textContent = '⟳ 同步最新版';
+      }
+    };
+  }
 
   loadState();
 });

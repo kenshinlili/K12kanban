@@ -5,6 +5,11 @@ import json
 import re
 import io
 import zipfile
+import shutil
+import time
+import threading
+import urllib.request
+import urllib.error
 from datetime import datetime, timedelta
 
 from flask import Flask, request, jsonify, send_from_directory, send_file
@@ -292,6 +297,62 @@ def api_backup():
     )
     resp.call_on_close(lambda: os.remove(tmp_path) if os.path.exists(tmp_path) else None)
     return resp
+
+
+@app.route('/api/sync', methods=['POST'])
+def api_sync():
+    """从 GitHub 拉取最新代码覆盖仓库根（仅家长可触发）。云端自更新入口。
+
+    流程：下载 codeload zipball → 解压 → 覆盖仓库根（跳过 instance/ 数据）→ 后台退出重启。
+    仓库设为 Public 时免 token；私有库请设环境变量 KANBAN_GITHUB_REPO / GITHUB_TOKEN。
+    """
+    member = request.args.get('member') or (request.get_json(silent=True) or {}).get('member')
+    if member not in ('dad', 'mom'):
+        return jsonify({'ok': False, 'error': '仅家长（爸爸/妈妈）可触发同步'}), 403
+
+    import tempfile
+    repo = os.environ.get('KANBAN_GITHUB_REPO', 'kenshinlili/K12kanban')
+    branch = os.environ.get('KANBAN_GITHUB_BRANCH', 'master')
+    zip_url = f'https://codeload.github.com/{repo}/archive/refs/heads/{branch}.zip'
+
+    repo_root = os.path.dirname(BASE_DIR)  # kanban-app/
+    tmpdir = tempfile.mkdtemp()
+    try:
+        zpath = os.path.join(tmpdir, 'repo.zip')
+        try:
+            urllib.request.urlretrieve(zip_url, zpath)
+        except Exception as e:
+            return jsonify({'ok': False, 'error': f'下载 GitHub 代码失败: {e}'}), 502
+        with zipfile.ZipFile(zpath) as zf:
+            zf.extractall(tmpdir)
+        # 解压后顶层目录形如 K12kanban-master/
+        subs = [d for d in os.listdir(tmpdir)
+                if os.path.isdir(os.path.join(tmpdir, d)) and d != 'repo.zip']
+        src = os.path.join(tmpdir, subs[0]) if subs else tmpdir
+        # 覆盖仓库根，跳过 instance/ 数据目录与 .git
+        for root, dirs, files in os.walk(src):
+            rel = os.path.relpath(root, src)
+            parts = rel.split(os.sep) if rel != '.' else []
+            if 'instance' in parts or '.git' in parts:
+                dirs[:] = []
+                continue
+            target_root = repo_root if rel == '.' else os.path.join(repo_root, rel)
+            os.makedirs(target_root, exist_ok=True)
+            for f in files:
+                if f == '.gitkeep':
+                    continue
+                shutil.copy2(os.path.join(root, f), os.path.join(target_root, f))
+    except Exception as e:
+        return jsonify({'ok': False, 'error': f'同步失败: {e}'}), 500
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+    # 后台延迟退出，由云端守护进程拉起新进程（端口释放后干净重启）
+    def _restart():
+        time.sleep(1.2)
+        os._exit(0)
+    threading.Thread(target=_restart, daemon=True).start()
+    return jsonify({'ok': True, 'msg': '已拉取最新代码，数秒后自动重启，刷新页面即可'})
 
 
 # ---------------- 打卡 ----------------
