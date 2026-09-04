@@ -51,8 +51,12 @@ function todayStr() {
 
 /* ---------- 数据 ---------- */
 async function loadState() {
-  const d = await get(`/state?date=${STATE.date}&member=${STATE.member}`);
+  const [d, v] = await Promise.all([
+    get(`/state?date=${STATE.date}&member=${STATE.member}`),
+    get('/version').catch(() => ({ ok: false }))
+  ]);
   if (d.ok) STATE.data = d;
+  if (v.ok && v.version) STATE.version = v.version;
   render();
 }
 async function loadCheckin(cid) {
@@ -88,6 +92,12 @@ function renderMembers() {
   // 仅家长（爸爸/妈妈）可见「同步最新版」按钮
   const syncBtn = document.getElementById('syncBtn');
   if (syncBtn) syncBtn.style.display = (STATE.member === 'dad' || STATE.member === 'mom') ? '' : 'none';
+  // 显示当前版本号（任何身份）
+  const verEl = document.getElementById('versionInfo');
+  if (verEl && STATE.version && STATE.version.short) {
+    verEl.textContent = 'v' + STATE.version.short;
+    verEl.style.display = '';
+  }
 }
 
 function renderKanban() {
@@ -1252,23 +1262,52 @@ document.addEventListener('DOMContentLoaded', () => {
   const syncBtn = document.getElementById('syncBtn');
   if (syncBtn) {
     syncBtn.onclick = async () => {
-      if (!confirm('确认从 GitHub 拉取最新代码并重启看板？\n（重启期间约 10 秒不可用，刷新即可）')) return;
+      if (!confirm('确认从 GitHub 拉取最新代码并重启看板？\n（重启期间约 10–30 秒不可用，刷新即可）')) return;
       syncBtn.disabled = true;
       syncBtn.textContent = '同步中…';
       try {
         const r = await post('/sync', { member: STATE.member });
         if (r && r.ok) {
-          alert('已触发同步，数秒后自动重启，请刷新页面。');
+          alert('已触发同步，后台拉取最新代码并重启。\n页面会自动检测新版本，检测到后提示刷新。');
+          pollVersion(r.old_version || null);
         } else {
           alert('同步失败：' + ((r && r.error) || '未知错误'));
+          syncBtn.disabled = false;
+          syncBtn.textContent = '⟳ 同步最新版';
         }
       } catch (e) {
         alert('同步请求异常：' + e);
-      } finally {
         syncBtn.disabled = false;
         syncBtn.textContent = '⟳ 同步最新版';
       }
     };
+  }
+
+  async function pollVersion(oldVersion) {
+    const oldCommit = oldVersion && oldVersion.commit ? oldVersion.commit : null;
+    let attempts = 0;
+    const maxAttempts = 40; // 最多 40 次 × 3 秒 ≈ 2 分钟
+    const interval = setInterval(async () => {
+      attempts++;
+      try {
+        const v = await get('/version');
+        if (v && v.ok && v.version && v.version.commit) {
+          if (oldCommit && v.version.commit !== oldCommit) {
+            clearInterval(interval);
+            if (confirm('看板已更新到新版（' + v.version.short + '），立即刷新？')) {
+              location.reload();
+            }
+            return;
+          }
+        }
+      } catch (e) {
+        // 服务重启中，忽略
+      }
+      if (attempts >= maxAttempts) {
+        clearInterval(interval);
+        alert('同步时间较长，请稍后手动刷新页面查看最新版本。');
+      }
+    }, 3000);
   }
 
   loadState();

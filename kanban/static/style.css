@@ -67,6 +67,28 @@ body {
 }
 .date-btn-today:hover { background: var(--primary-soft); }
 
+.topbar-right { display: flex; align-items: center; gap: 10px; }
+.version-info {
+  font-size: 12px;
+  color: var(--text-soft);
+  background: var(--bg);
+  padding: 3px 8px;
+  border-radius: 12px;
+  font-family: monospace;
+  white-space: nowrap;
+}
+.sync-btn {
+  border: 1px solid var(--primary);
+  background: #fff;
+  color: var(--primary);
+  border-radius: 14px;
+  padding: 5px 12px;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.sync-btn:hover:not(:disabled) { background: var(--primary-soft); }
+.sync-btn:disabled { opacity: 0.6; cursor: not-allowed; }
 .member-switch { display: flex; gap: 6px; }
 .member-btn {
   border: 1px solid var(--border);
