@@ -337,9 +337,16 @@ def api_sync():
     repo_root = os.path.dirname(BASE_DIR)  # kanban-app/
 
     def _do_sync():
-        """后台线程：下载 GitHub zip、覆盖仓库根（跳过 instance/），再启动接替进程平滑重启。"""
+        """后台线程：下载 GitHub zip、覆盖代码（严禁触碰 instance/）、平滑重启。
+
+        数据保护铁律（项目第一原则）：用户数据 INSTANCE_DIR 是不可变资产，
+        任何代码更新（本函数）都不得读取、删除或覆盖它。违反即中止重启、保留旧服务。
+        """
         import tempfile
         import subprocess
+        import logging as _log
+        instance_dir = INSTANCE_DIR  # 模块顶层常量，恒定指向用户数据目录
+        instance_present_before = os.path.isdir(instance_dir)
         tmpdir = tempfile.mkdtemp()
         try:
             zpath = os.path.join(tmpdir, 'repo.zip')
@@ -350,7 +357,7 @@ def api_sync():
             subs = [d for d in os.listdir(tmpdir)
                     if os.path.isdir(os.path.join(tmpdir, d)) and d != 'repo.zip']
             src = os.path.join(tmpdir, subs[0]) if subs else tmpdir
-            # 覆盖仓库根，跳过 instance/ 数据目录与 .git
+            # 覆盖仓库根：只动代码，instance/ 数据目录与 .git 一律跳过、绝不进入
             for root, dirs, files in os.walk(src):
                 rel = os.path.relpath(root, src)
                 parts = rel.split(os.sep) if rel != '.' else []
@@ -363,22 +370,25 @@ def api_sync():
                     if f == '.gitkeep':
                         continue
                     shutil.copy2(os.path.join(root, f), os.path.join(target_root, f))
-            # 启动接替进程：延迟绑定端口（KANBAN_DEFER），等本进程退出释放 3000
-            env = dict(os.environ)
-            env['KANBAN_DEFER'] = '3'
-            subprocess.Popen(
-                [sys.executable, os.path.join(BASE_DIR, 'app.py')],
-                env=env, stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                close_fds=True, start_new_session=True,
-            )
-            time.sleep(1)  # 让接替进程进入延迟等待
         except Exception:
             # 覆盖失败：保持当前服务存活，绝不自杀
             return
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
-        # 父进程退出释放端口，接替进程随后绑定 —— 进程平滑重启，不依赖外部守护
+        # 数据护盾：若 instance/ 在覆盖过程中被意外移除，立即中止重启，保留旧服务以护数据
+        if instance_present_before and not os.path.isdir(instance_dir):
+            _log.error('[sync] 检测到 instance/ 在覆盖后消失，中止重启以护数据')
+            return
+        # 启动接替进程：延迟绑定端口（KANBAN_DEFER），等本进程退出释放 3000
+        env = dict(os.environ)
+        env['KANBAN_DEFER'] = '3'
+        subprocess.Popen(
+            [sys.executable, os.path.join(BASE_DIR, 'app.py')],
+            env=env, stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            close_fds=True, start_new_session=True,
+        )
+        time.sleep(1)  # 让接替进程进入延迟等待
         os._exit(0)
 
     threading.Thread(target=_do_sync, daemon=True).start()
