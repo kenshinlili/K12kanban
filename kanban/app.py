@@ -53,6 +53,8 @@ if VERSION.get('branch') in (None, 'unknown'):
     VERSION['branch'] = os.environ.get('KANBAN_BRANCH', 'unknown')
 
 app = Flask(__name__, static_folder=None)
+# 允许上传备份 zip（照片累积后可能较大，设 50MB）
+app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024
 
 
 # ---------------- helpers ----------------
@@ -314,6 +316,70 @@ def api_backup():
     return resp
 
 
+@app.route('/api/restore', methods=['POST'])
+def api_restore():
+    """从备份 zip 恢复云端用户数据（仅家长可触发）。
+
+    数据恢复铁律：
+    1. 仅 dad/mom 可操作；
+    2. 恢复前自动把当前 instance/ 备份到 instance.bak.<时间戳>；
+    3. 校验 zip 至少包含 data/kanban.db；
+    4. 解压成功后平滑重启，使数据库连接重新加载。
+    """
+    member = request.args.get('member') or (request.get_json(silent=True) or {}).get('member')
+    if member not in ('dad', 'mom'):
+        return jsonify({'ok': False, 'error': '仅家长（爸爸/妈妈）可恢复数据'}), 403
+
+    if 'file' not in request.files:
+        return jsonify({'ok': False, 'error': '请上传备份 zip 文件'}), 400
+    uploaded = request.files['file']
+    if not uploaded.filename or not uploaded.filename.lower().endswith('.zip'):
+        return jsonify({'ok': False, 'error': '只接受 .zip 备份文件'}), 400
+
+    import tempfile
+    tmp_zip = tempfile.NamedTemporaryFile(suffix='.zip', delete=False)
+    tmp_zip_path = tmp_zip.name
+    try:
+        uploaded.save(tmp_zip_path)
+        with zipfile.ZipFile(tmp_zip_path) as zf:
+            names = zf.namelist()
+            if 'data/kanban.db' not in names:
+                return jsonify({'ok': False, 'error': '备份 zip 格式错误：缺少 data/kanban.db'}), 400
+
+            # 先备份当前 instance/（即使为空也留痕）
+            bak_dir = INSTANCE_DIR + '.bak.' + datetime.now().strftime('%Y%m%d-%H%M%S')
+            if os.path.isdir(INSTANCE_DIR):
+                shutil.move(INSTANCE_DIR, bak_dir)
+            os.makedirs(DATA_DIR, exist_ok=True)
+            os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+            # 解压到 instance/
+            zf.extractall(INSTANCE_DIR)
+
+            # 校验数据库文件确实写出
+            if not os.path.exists(os.path.join(DATA_DIR, 'kanban.db')):
+                # 回滚：恢复之前的备份
+                if os.path.isdir(bak_dir):
+                    shutil.rmtree(INSTANCE_DIR, ignore_errors=True)
+                    shutil.move(bak_dir, INSTANCE_DIR)
+                return jsonify({'ok': False, 'error': '恢复失败：解压后未找到数据库文件，已回滚'}), 500
+    except Exception as e:
+        return jsonify({'ok': False, 'error': f'恢复异常：{e}'}), 500
+    finally:
+        try:
+            os.remove(tmp_zip_path)
+        except Exception:
+            pass
+
+    # 数据恢复成功，启动接替进程重启以重新加载数据库
+    threading.Thread(target=lambda: _spawn_successor_and_exit(delay=2), daemon=True).start()
+    return jsonify({
+        'ok': True,
+        'msg': '数据恢复成功，服务正在重启，约 10–30 秒后刷新页面即可',
+        'instance_dir': INSTANCE_DIR,
+    }), 202
+
+
 # GitHub 状态缓存，避免前端轮询时频繁请求 API（30 秒）
 _GITHUB_STATUS_CACHE = (0, None)
 
@@ -377,6 +443,21 @@ def api_status():
         'can_sync': can_sync,
         'warning': warning,
     })
+
+
+def _spawn_successor_and_exit(delay=3):
+    """启动一个接替进程，然后父进程退出，实现平滑重启（不依赖外部守护）。"""
+    import subprocess
+    env = dict(os.environ)
+    env['KANBAN_DEFER'] = str(delay)
+    subprocess.Popen(
+        [sys.executable, os.path.join(BASE_DIR, 'app.py')],
+        env=env, stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        close_fds=True, start_new_session=True,
+    )
+    time.sleep(1)  # 让接替进程进入延迟等待
+    os._exit(0)
 
 
 @app.route('/api/sync', methods=['POST'])
@@ -452,17 +533,8 @@ def api_sync():
         if instance_present_before and not os.path.isdir(instance_dir):
             _log.error('[sync] 检测到 instance/ 在覆盖后消失，中止重启以护数据')
             return
-        # 启动接替进程：延迟绑定端口（KANBAN_DEFER），等本进程退出释放 3000
-        env = dict(os.environ)
-        env['KANBAN_DEFER'] = '3'
-        subprocess.Popen(
-            [sys.executable, os.path.join(BASE_DIR, 'app.py')],
-            env=env, stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            close_fds=True, start_new_session=True,
-        )
-        time.sleep(1)  # 让接替进程进入延迟等待
-        os._exit(0)
+        # 启动接替进程平滑重启
+        _spawn_successor_and_exit(delay=3)
 
     threading.Thread(target=_do_sync, daemon=True).start()
     return jsonify({

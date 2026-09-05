@@ -100,6 +100,17 @@ body {
   white-space: nowrap;
 }
 .sync-btn:hover:not(:disabled) { background: var(--primary-soft); }
+.restore-btn {
+  border: 1px solid #CC6600;
+  background: #fff;
+  color: #CC6600;
+  border-radius: 14px;
+  padding: 5px 12px;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.restore-btn:hover:not(:disabled) { background: #FFF5EB; }
 .sync-btn:disabled { opacity: 0.6; cursor: not-allowed; }
 .member-switch { display: flex; gap: 6px; }
 .member-btn {

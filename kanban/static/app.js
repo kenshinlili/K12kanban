@@ -91,9 +91,11 @@ function renderMembers() {
   el.querySelectorAll('.member-btn').forEach(b => {
     b.onclick = () => { STATE.member = b.dataset.member; render(); };
   });
-  // 仅家长（爸爸/妈妈）可见「同步最新版」按钮
+  // 仅家长（爸爸/妈妈）可见「同步最新版」「恢复数据」按钮
   const syncBtn = document.getElementById('syncBtn');
   if (syncBtn) syncBtn.style.display = (STATE.member === 'dad' || STATE.member === 'mom') ? '' : 'none';
+  const restoreBtn = document.getElementById('restoreBtn');
+  if (restoreBtn) restoreBtn.style.display = (STATE.member === 'dad' || STATE.member === 'mom') ? '' : 'none';
   // 显示当前版本号（任何身份）
   const verEl = document.getElementById('versionInfo');
   if (verEl && STATE.version && STATE.version.short) {
@@ -1314,6 +1316,46 @@ document.addEventListener('DOMContentLoaded', () => {
         alert('同步请求异常：' + e);
         syncBtn.disabled = false;
         syncBtn.textContent = '⟳ 同步最新版';
+      }
+    };
+  }
+
+  // 「恢复数据」按钮：家长从备份 zip 恢复云端 instance/ 数据
+  const restoreBtn = document.getElementById('restoreBtn');
+  const restoreFile = document.getElementById('restoreFile');
+  if (restoreBtn && restoreFile) {
+    restoreBtn.onclick = () => {
+      if (!confirm('此操作会用上传的备份 zip 覆盖云端所有照片和数据库。\n请先确认 zip 是正确的看板备份。继续？')) return;
+      restoreFile.click();
+    };
+    restoreFile.onchange = async () => {
+      const file = restoreFile.files[0];
+      if (!file) return;
+      if (!file.name.toLowerCase().endsWith('.zip')) {
+        alert('只接受 .zip 备份文件');
+        return;
+      }
+      restoreBtn.disabled = true;
+      restoreBtn.textContent = '恢复中…';
+      const form = new FormData();
+      form.append('file', file);
+      try {
+        const r = await fetch('/api/restore?member=' + encodeURIComponent(STATE.member), {
+          method: 'POST',
+          body: form,
+        });
+        const data = await r.json().catch(() => ({}));
+        if (data && data.ok) {
+          alert('数据恢复已触发，服务正在重启。\n约 10–30 秒后刷新页面，检查照片是否回来。');
+        } else {
+          alert('恢复失败：' + ((data && data.error) || '未知错误'));
+          restoreBtn.disabled = false;
+          restoreBtn.textContent = '⬆ 恢复数据';
+        }
+      } catch (e) {
+        alert('恢复请求异常：' + e);
+        restoreBtn.disabled = false;
+        restoreBtn.textContent = '⬆ 恢复数据';
       }
     };
   }
