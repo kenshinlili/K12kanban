@@ -418,33 +418,120 @@ def api_restore():
 # GitHub 状态缓存，避免前端轮询时频繁请求 API（30 秒）
 _GITHUB_STATUS_CACHE = (0, None)
 
+# ---------------------------------------------------------------------------
+# GitHub 镜像加速：云端沙箱直连 codeload.github.com / api.github.com 常被 TLS 拦截，
+# 这里用公益镜像做「前缀代理」竞速。所有镜像都是 URL 前缀代理形式：
+#   https://<镜像>/<原始 GitHub URL>
+# 竞速成功的镜像会缓存到 version.json 的 mirror_used 字段，下次 sync 优先复用。
+# ---------------------------------------------------------------------------
+GITHUB_MIRRORS = [
+    None,                          # 直连原站（优先，最快）
+    'https://ghproxy.com',
+    'https://ghproxy.net',
+    'https://github.akams.cn',
+    'https://gh.llkk.cc',
+    'https://hub.gitmirror.com',
+    'https://ghproxy.homeboyc.cn',
+]
+
+# 运行时记住上次成功的镜像（不落盘，进程重启后重新竞速）
+_MIRROR_STATE = {'api': None, 'zip': None}
+
+# sync 过程状态：让前端能看到 sync 卡在哪一步、失败原因（不再 120 秒空轮询）
+_SYNC_STATE = {
+    'running': False,
+    'phase': None,      # guard / download / extract / restart / done
+    'ok': None,         # True / False / None(进行中)
+    'error': None,
+    'mirror': None,     # 实际使用的镜像（direct / ghproxy.com / ...）
+    'started_at': None,
+    'finished_at': None,
+}
+
+
+def _candidate_urls(raw_url, kind):
+    """按 kind('api'|'zip') 生成候选 URL 列表，上次的成功镜像排最前。"""
+    preferred = _MIRROR_STATE.get(kind)
+    mirrors = list(GITHUB_MIRRORS)
+    if preferred and preferred in mirrors:
+        mirrors.remove(preferred)
+        mirrors.insert(0, preferred)
+    urls = []
+    for m in mirrors:
+        urls.append(raw_url if m is None else f'{m}/{raw_url}')
+    return urls
+
+
+def _http_get_bytes(url, timeout=10):
+    """GET 一个 URL，返回 bytes。失败抛异常。"""
+    req = urllib.request.Request(url, headers={
+        'User-Agent': 'K12kanban-sync/1.0',
+        'Accept': '*/*',
+    })
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read()
+
+
+def fetch_via_mirrors(raw_url, kind='api', timeout=10, max_bytes=None):
+    """依次尝试直连+各镜像，返回 (bytes, used_mirror)。全部失败返回 (None, None)。
+
+    kind: 'api'（取 JSON，超时短）| 'zip'（下载代码包，超时长）
+    """
+    errors = []
+    for url in _candidate_urls(raw_url, kind):
+        label = 'direct' if url == raw_url else url.split('/')[2]
+        try:
+            data = _http_get_bytes(url, timeout=timeout)
+            if not data:
+                errors.append(f'{label}: empty')
+                continue
+            if max_bytes and len(data) > max_bytes:
+                errors.append(f'{label}: too large ({len(data)})')
+                continue
+            # 记住成功的镜像
+            _MIRROR_STATE[kind] = None if url == raw_url else f'https://{url.split("/")[2]}'
+            return data, label
+        except Exception as e:
+            errors.append(f'{label}: {type(e).__name__}')
+            continue
+    print(f'[mirror] all failed for {raw_url}: {"; ".join(errors)}')
+    return None, None
+
 
 def fetch_github_head(repo='kenshinlili/K12kanban', branch='master'):
     """查询 GitHub 指定分支最新 commit（含提交时间），带 30 秒本地缓存。
 
+    走镜像竞速：先直连 api.github.com，失败则依次尝试公益镜像。
     返回 commit/short/date（commit 的提交时间 ISO8601），date 用于 sync 守门判断新旧。
     """
     global _GITHUB_STATUS_CACHE
     now = time.time()
     if now - _GITHUB_STATUS_CACHE[0] < 30 and _GITHUB_STATUS_CACHE[1] is not None:
         return _GITHUB_STATUS_CACHE[1]
-    url = f'https://api.github.com/repos/{repo}/commits/{branch}'
+
+    raw_url = f'https://api.github.com/repos/{repo}/commits/{branch}'
+    data_bytes, used = fetch_via_mirrors(raw_url, kind='api', timeout=8, max_bytes=2 * 1024 * 1024)
+    if data_bytes is None:
+        result = {'commit': 'unknown', 'short': 'unknown', 'branch': branch,
+                  'error': 'all mirrors failed'}
+        _GITHUB_STATUS_CACHE = (now, result)
+        return result
     try:
-        with urllib.request.urlopen(url, timeout=10) as resp:
-            data = json.loads(resp.read().decode('utf-8'))
-            commit_date = None
-            try:
-                commit_date = data['commit']['committer']['date']
-            except Exception:
-                pass
-            result = {
-                'commit': data.get('sha', 'unknown'),
-                'short': (data.get('sha') or 'unknown')[:12],
-                'branch': branch,
-                'date': commit_date,
-            }
-            _GITHUB_STATUS_CACHE = (now, result)
-            return result
+        data = json.loads(data_bytes.decode('utf-8'))
+        commit_date = None
+        try:
+            commit_date = data['commit']['committer']['date']
+        except Exception:
+            pass
+        result = {
+            'commit': data.get('sha', 'unknown'),
+            'short': (data.get('sha') or 'unknown')[:12],
+            'branch': branch,
+            'date': commit_date,
+            'via': used,
+        }
+        _GITHUB_STATUS_CACHE = (now, result)
+        return result
     except Exception as e:
         result = {'commit': 'unknown', 'short': 'unknown', 'branch': branch, 'error': str(e)}
         _GITHUB_STATUS_CACHE = (now, result)
@@ -576,6 +663,9 @@ def api_sync():
         instance_dir = INSTANCE_DIR  # 模块顶层常量，恒定指向用户数据目录
         instance_present_before = os.path.isdir(instance_dir)
         tmpdir = tempfile.mkdtemp()
+        _SYNC_STATE.update(running=True, phase='guard', ok=None, error=None,
+                           mirror=None, finished_at=None,
+                           started_at=datetime.now().isoformat(timespec='seconds'))
         try:
             # ---- 版本守门：GitHub 未领先则中止 ----
             try:
@@ -585,15 +675,33 @@ def api_sync():
                 if (gh_head.get('commit') not in (None, 'unknown')
                         and gh_head.get('commit') == VERSION.get('commit')):
                     _log.warning('[sync] 云端已与 GitHub 对齐，跳过覆盖')
+                    _SYNC_STATE.update(ok=False, phase='guard',
+                                       error='云端已与 GitHub 对齐，无需同步',
+                                       finished_at=datetime.now().isoformat(timespec='seconds'))
                     return
                 if gh_date and cloud_date and gh_date <= cloud_date:
                     _log.warning('[sync] GitHub 未领先云端，中止同步（防止回退）')
+                    _SYNC_STATE.update(ok=False, phase='guard',
+                                       error='GitHub 未领先云端，请先在本地 push 最新 commit',
+                                       finished_at=datetime.now().isoformat(timespec='seconds'))
                     return
             except Exception:
                 pass  # 守门判断异常不阻断，交给实际下载流程决定
 
             zpath = os.path.join(tmpdir, 'repo.zip')
-            urllib.request.urlretrieve(zip_url, zpath)
+            # 走镜像竞速下载（云端沙箱直连 codeload 常被 TLS 拦截）
+            zip_bytes, used_mirror = fetch_via_mirrors(
+                zip_url, kind='zip', timeout=60, max_bytes=80 * 1024 * 1024)
+            if zip_bytes is None:
+                _SYNC_STATE.update(ok=False, phase='download',
+                                   error='所有镜像下载失败：' + zip_url,
+                                   finished_at=datetime.now().isoformat(timespec='seconds'))
+                _log.error('[sync] zip 下载失败（直连+全部镜像）')
+                return
+            _SYNC_STATE['mirror'] = used_mirror
+            _SYNC_STATE['phase'] = 'extract'
+            with open(zpath, 'wb') as _zf:
+                _zf.write(zip_bytes)
             with zipfile.ZipFile(zpath) as zf:
                 zf.extractall(tmpdir)
             # 解压后顶层目录形如 K12kanban-master/
@@ -613,8 +721,7 @@ def api_sync():
                     if f == '.gitkeep':
                         continue
                     shutil.copy2(os.path.join(root, f), os.path.join(target_root, f))
-            # 同步成功后立即更新 version.json 为 GitHub HEAD commit + 时间，
-            # 确保重启后 /api/version 与 /api/status 能正确对齐
+            _SYNC_STATE['phase'] = 'write_version'
             try:
                 gh_head = fetch_github_head(repo, branch)
                 if gh_head.get('commit') and gh_head['commit'] != 'unknown':
@@ -625,19 +732,27 @@ def api_sync():
                             'branch': branch,
                             'commit_date': gh_head.get('date'),
                             'built_at': datetime.now().isoformat(timespec='seconds'),
+                            'mirror_used': _SYNC_STATE.get('mirror'),
                         }, _vf, ensure_ascii=False, indent=2)
             except Exception:
                 pass
-        except Exception:
+        except Exception as e:
             # 覆盖失败：保持当前服务存活，绝不自杀
+            _SYNC_STATE.update(ok=False, error=f'覆盖失败：{e}',
+                               finished_at=datetime.now().isoformat(timespec='seconds'))
             return
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
         # 数据护盾：若 instance/ 在覆盖过程中被意外移除，立即中止重启，保留旧服务以护数据
         if instance_present_before and not os.path.isdir(instance_dir):
             _log.error('[sync] 检测到 instance/ 在覆盖后消失，中止重启以护数据')
+            _SYNC_STATE.update(ok=False, phase='guard',
+                               error='数据护盾触发：instance/ 消失，已中止重启保护数据',
+                               finished_at=datetime.now().isoformat(timespec='seconds'))
             return
         # 启动接替进程平滑重启
+        _SYNC_STATE.update(ok=True, phase='restart',
+                           finished_at=datetime.now().isoformat(timespec='seconds'))
         _spawn_successor_and_exit(delay=3)
 
     threading.Thread(target=_do_sync, daemon=True).start()
@@ -646,6 +761,48 @@ def api_sync():
         'msg': '已触发同步，后台下载最新代码并重启，约 10–30 秒后刷新页面即可',
         'old_version': VERSION
     }), 202
+
+
+@app.route('/api/sync-status')
+def api_sync_status():
+    """返回最近一次 sync 的进度/结果，供前端轮询显示卡在哪一步。
+
+    phase: guard(守门) / download(下载) / extract(解压) / write_version / restart(重启)
+    ok:    True 成功 / False 失败 / None 进行中
+    """
+    return jsonify({'ok': True, 'sync': dict(_SYNC_STATE)})
+
+
+@app.route('/api/mirror-test')
+def api_mirror_test():
+    """诊断接口：逐个测试 GitHub 直连与各镜像的连通性，返回可用列表。
+
+    用于确认云端沙箱到底能访问哪个镜像，排查 sync 失败原因。
+    """
+    repo = os.environ.get('KANBAN_GITHUB_REPO', 'kenshinlili/K12kanban')
+    branch = os.environ.get('KANBAN_GITHUB_BRANCH', 'master')
+    api_url = f'https://api.github.com/repos/{repo}/commits/{branch}'
+    zip_url = f'https://codeload.github.com/{repo}/archive/refs/heads/{branch}.zip'
+    api_results, zip_results = [], []
+    for m in GITHUB_MIRRORS:
+        label = 'direct' if m is None else m.split('//')[-1]
+        for kind, raw, sink in (('api', api_url, api_results), ('zip', zip_url, zip_results)):
+            url = raw if m is None else f'{m}/{raw}'
+            t0 = time.time()
+            try:
+                data = _http_get_bytes(url, timeout=8 if kind == 'api' else 15)
+                sink.append({'mirror': label, 'ok': True, 'bytes': len(data),
+                             'ms': int((time.time() - t0) * 1000)})
+            except Exception as e:
+                sink.append({'mirror': label, 'ok': False, 'error': type(e).__name__,
+                             'ms': int((time.time() - t0) * 1000)})
+    return jsonify({
+        'ok': True,
+        'api': api_results,
+        'zip': zip_results,
+        'cache_api': _MIRROR_STATE.get('api') or 'direct',
+        'cache_zip': _MIRROR_STATE.get('zip') or 'direct',
+    })
 
 
 # ---------------- 打卡 ----------------
