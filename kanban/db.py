@@ -257,6 +257,23 @@ def migrate_db(conn):
         conn.execute('CREATE INDEX IF NOT EXISTS idx_checkins_board_date '
                      'ON checkins(board_id, checkin_date)')
 
+    # 4. 清理 wrong_questions.correct_answer 里历史残留的拼音括号
+    #    V1.10 改版：正解不再自动加拼音，已经入库的正解也清理掉
+    #    匹配模式：「汉字（拼音字母与声调）」，例如「风平浪静（fēng píng làng jìng）」
+    import re as _re_pin
+    _pin_re = _re_pin.compile(r'（[a-zA-Zāáǎàēéěèīíǐìōóǒòūúǔùǖǘǚǜü\s]+）')
+    fixed = 0
+    for row in conn.execute("SELECT id, correct_answer FROM wrong_questions WHERE correct_answer LIKE '%（%'").fetchall():
+        old = row['correct_answer'] or ''
+        new = _pin_re.sub('', old)
+        # 同时合并相邻多余的分号/逗号：;; → ;，末尾标点也清理
+        new = _re_pin.sub(r'[；;]{2,}', '；', new).strip()
+        if new != old:
+            conn.execute("UPDATE wrong_questions SET correct_answer=? WHERE id=?", (new, row['id']))
+            fixed += 1
+    if fixed:
+        print(f"[migrate] cleaned pinyin from {fixed} correct_answer rows")
+
 
 def _seed_tree(conn, board_id, tree):
     """两级知识点种子：tree = [(单元名, [课文/活动...]), ...]"""

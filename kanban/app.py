@@ -134,15 +134,15 @@ def _attach_pinyin(text):
 
 
 def auto_pinyin_questions(conn, questions, subject):
-    """对语文/英语题的 content/correct_answer 字段自动加拼音（如果还没有括号拼音）"""
+    """对语文/英语题的 content 字段自动加拼音（如果还没有括号拼音）。
+    注意：correct_answer 不再加拼音——正解只保留答案本身。
+    候选答案（answer_candidates）也不加拼音，是 AI 检索结果，不该被注音。"""
     if subject not in ('语文', '英语') or not HAS_PINYIN:
         return questions
     for q in questions:
         # content 已有括号拼音则跳过
         if '（' not in (q.get('content') or ''):
             q['content'] = _attach_pinyin(q.get('content', ''))
-        if '（' not in (q.get('correct_answer') or ''):
-            q['correct_answer'] = _attach_pinyin(q.get('correct_answer', ''))
     return questions
 
 

@@ -1344,7 +1344,18 @@ function bindDrawerEvents() {
   const body = document.getElementById('drawerBody');
 
   const btnOpenReview = document.getElementById('btnOpenReviewModal');
-  if (btnOpenReview) btnOpenReview.onclick = () => openReviewModal(ci);
+  if (btnOpenReview) btnOpenReview.onclick = (e) => {
+    e.stopPropagation();
+    e.preventDefault();
+    const realCi = CURRENT_CHECKIN;
+    if (!realCi) { toast('请先打开某次打卡详情'); return; }
+    const run = (realCi.runs || [])[0];
+    if (!run || !run.questions || !run.questions.length) {
+      toast('暂无识别结果，无可审核内容');
+      return;
+    }
+    openReviewModal(realCi);
+  };
 
   const btnUpdate = document.getElementById('btnUpdateCI');
   if (btnUpdate) btnUpdate.onclick = async () => {
@@ -1736,16 +1747,27 @@ class UndoManager {
 }
 
 function openReviewModal(ci) {
-  REVIEW_MODAL_DATA = { checkin: ci, questions: JSON.parse(JSON.stringify((ci.runs || [])[0]?.questions || [])) };
-  RQE_UNDO.clear();
-  renderReviewModal();
-  document.getElementById('reviewModalMask').classList.add('show');
-  document.getElementById('reviewModal').classList.add('show');
+  try {
+    REVIEW_MODAL_DATA = { checkin: ci, questions: JSON.parse(JSON.stringify((ci.runs || [])[0]?.questions || [])) };
+    RQE_UNDO.clear();
+    renderReviewModal();
+    // 关掉抽屉遮罩避免挡住 review-modal（drawer 本身保留，关闭 reviewModal 时无需恢复）
+    const drawerMask = document.getElementById('drawerMask');
+    if (drawerMask) drawerMask.style.pointerEvents = 'none';
+    document.getElementById('reviewModalMask').classList.add('show');
+    document.getElementById('reviewModal').classList.add('show');
+  } catch (e) {
+    console.error('[review-modal] open failed:', e);
+    toast('打开分屏审核失败：' + (e.message || e));
+  }
 }
 
 function closeReviewModal() {
   document.getElementById('reviewModalMask').classList.remove('show');
   document.getElementById('reviewModal').classList.remove('show');
+  // 恢复抽屉遮罩
+  const drawerMask = document.getElementById('drawerMask');
+  if (drawerMask) drawerMask.style.pointerEvents = '';
   REVIEW_MODAL_DATA = null;
   RQE_UNDO.clear();
 }
