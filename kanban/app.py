@@ -745,15 +745,28 @@ def api_checkin_detail(cid):
 
 @app.route('/api/pending-ai')
 def api_pending_ai():
-    """列出待 AI 识别的打卡（含照片地址），供 AI 拉取"""
+    """列出待 AI 识别的打卡（含照片地址），供 AI 拉取。
+
+    同时包含：
+    - 全新未识别的 checkin（status='pending_ai'）
+    - 整单打回重跑的 checkin（status='rerun_requested'）
+    - 已有识别结果、但其中有单题被标记为 rerun_requested 的 checkin
+    """
     conn = db.get_conn()
     try:
+        # 先找出所有"有单题要求重跑"的 checkin_id
+        rerun_cids = {r['checkin_id'] for r in conn.execute(
+            "SELECT DISTINCT checkin_id FROM wrong_questions WHERE status='rerun_requested'"
+        ).fetchall()}
+
         rows = conn.execute('''
-            SELECT c.*, b.subject, b.name AS board_name, b.track_mode
+            SELECT DISTINCT c.*, b.subject, b.name AS board_name, b.track_mode
             FROM checkins c JOIN boards b ON c.board_id=b.id
             WHERE c.status IN ('pending_ai','rerun_requested')
+               OR c.id IN ({})
             ORDER BY c.checkin_date DESC, c.id DESC LIMIT 50
-        ''').fetchall()
+        '''.format(','.join('?' * len(rerun_cids)) if rerun_cids else '-1'),
+            tuple(rerun_cids)).fetchall()
         out = []
         for r in rows:
             item = row2dict(r)
@@ -771,6 +784,11 @@ def api_pending_ai():
                     SELECT * FROM review_actions WHERE checkin_id=? AND action='request_rerun'
                     ORDER BY id DESC LIMIT 1''', (r['id'],)).fetchone()
                 item['last_comment'] = act['comment'] if act else None
+            # 单题重跑请求
+            item['rerun_questions'] = [row2dict(q) for q in conn.execute(
+                "SELECT id, content, review_comment FROM wrong_questions "
+                "WHERE checkin_id=? AND status='rerun_requested' ORDER BY sort_order, id",
+                (r['id'],)).fetchall()]
             out.append(item)
         return jsonify({'ok': True, 'items': out})
     finally:
@@ -780,8 +798,16 @@ def api_pending_ai():
 @app.route('/api/checkin/<int:cid>/ai-result', methods=['POST'])
 def api_ai_result(cid):
     """AI 回填识别结果。
-    body: { operator, summary, questions: [{content, student_answer, correct_answer,
-            error_type, knowledge_point, confidence}] }
+    body: {
+      operator, summary,
+      questions: [{
+        content,              # 题目原文：必须是印刷体，不得改写，不得包含手写答案
+        student_answer,       # 学生当时写的答案（可选，用于了解错误点）
+        correct_answer,       # 家长确认保留的最终正确答案
+        answer_candidates,    # JSON: [{source:'ai'|'web', answer:'...'}, ...]
+        error_type, knowledge_point, confidence
+      }]
+    }
     """
     data = request.get_json() or {}
     operator = data.get('operator') or 'ai'
@@ -802,13 +828,17 @@ def api_ai_result(cid):
         # 清空该 run 旧错题（同版本重填）
         conn.execute('DELETE FROM wrong_questions WHERE run_id=?', (run['id'],))
         for i, q in enumerate(questions, 1):
+            candidates = q.get('answer_candidates')
+            candidates_json = json.dumps(candidates, ensure_ascii=False) if candidates else None
             conn.execute(
                 'INSERT INTO wrong_questions (run_id, checkin_id, content, student_answer, '
-                'correct_answer, error_type, knowledge_point, confidence, status, sort_order) '
-                'VALUES (?,?,?,?,?,?,?,?,?,?)',
+                'correct_answer, error_type, knowledge_point, confidence, status, sort_order, '
+                'answer_candidates) '
+                'VALUES (?,?,?,?,?,?,?,?,?,?,?)',
                 (run['id'], cid, q.get('content', ''), q.get('student_answer'),
                  q.get('correct_answer'), q.get('error_type'),
-                 q.get('knowledge_point'), q.get('confidence', 1.0), 'pending', i))
+                 q.get('knowledge_point'), q.get('confidence', 1.0), 'pending', i,
+                 candidates_json))
 
         new_status = 'pending_review' if questions else 'confirmed'
         conn.execute(
@@ -830,7 +860,7 @@ def api_ai_result(cid):
 
 @app.route('/api/question/<int:qid>/update', methods=['POST'])
 def api_update_question(qid):
-    """家长人工修正错题字段（题目/错答/正解/错误类型/知识点）。
+    """家长人工修正错题字段（题目/错答/正解/候选答案/错误类型/知识点）。
 
     支持在审核前或审核后修正，修正后保持原审核状态不变（已确认仍保持确认）。
     """
@@ -838,6 +868,12 @@ def api_update_question(qid):
     member = data.get('member_id') or 'dad'
     allowed = {'content', 'student_answer', 'correct_answer', 'error_type', 'knowledge_point'}
     updates = {k: (data.get(k) or '').strip() for k in allowed if data.get(k) is not None}
+
+    # answer_candidates 是 JSON 数组，单独处理
+    candidates = data.get('answer_candidates')
+    if candidates is not None:
+        updates['answer_candidates'] = json.dumps(candidates, ensure_ascii=False)
+
     if not updates:
         return jsonify({'ok': False, 'error': '没有提供要更新的字段'}), 400
 
@@ -882,6 +918,36 @@ def api_review_question(qid):
         conn.close()
 
 
+@app.route('/api/question/<int:qid>/request-rerun', methods=['POST'])
+def api_question_request_rerun(qid):
+    """家长对单道错题请求重新识别（仅家长可触发）。
+
+    看板本身不内置视觉模型，本接口把该题标记为 rerun_requested，
+    并进入 /api/pending-ai 队列，等待外部 AI 重新识别后回填。
+    """
+    data = request.get_json() or {}
+    member = data.get('member_id') or 'dad'
+    if member not in ('dad', 'mom'):
+        return jsonify({'ok': False, 'error': '仅家长可请求重新识别'}), 403
+    comment = (data.get('comment') or '').strip()
+
+    conn = db.get_conn()
+    try:
+        q = conn.execute('SELECT * FROM wrong_questions WHERE id=?', (qid,)).fetchone()
+        if not q:
+            return jsonify({'ok': False, 'error': 'not found'}), 404
+        conn.execute(
+            "UPDATE wrong_questions SET status='rerun_requested', review_comment=?, reviewer_id=?, reviewed_at=? "
+            "WHERE id=?", (comment, member, db.now_str(), qid))
+        log_action(conn, q['checkin_id'], q['run_id'], member,
+                   'question_request_rerun', comment)
+        conn.commit()
+        return jsonify({'ok': True, 'status': 'rerun_requested',
+                        'msg': '已请求重新识别，AI 处理后会更新结果'})
+    finally:
+        conn.close()
+
+
 @app.route('/api/checkin/<int:cid>/finalize', methods=['POST'])
 def api_finalize(cid):
     """审核完成：全部处理完 → confirmed；若有驳回且填了意见 → 标记需重跑但不自动改状态"""
@@ -898,10 +964,10 @@ def api_finalize(cid):
         pending = 0
         if run:
             pending = conn.execute(
-                "SELECT COUNT(*) AS c FROM wrong_questions WHERE run_id=? AND status='pending'",
+                "SELECT COUNT(*) AS c FROM wrong_questions WHERE run_id=? AND status IN ('pending','rerun_requested')",
                 (run['id'],)).fetchone()['c']
         if pending > 0:
-            return jsonify({'ok': False, 'error': f'还有 {pending} 条未审核'}), 400
+            return jsonify({'ok': False, 'error': f'还有 {pending} 条未审核/待重新识别'}), 400
         conn.execute('UPDATE checkins SET status=?, updated_at=? WHERE id=?',
                      ('confirmed', db.now_str(), cid))
         # 错题入库时自动建复习计划

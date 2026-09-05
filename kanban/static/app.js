@@ -926,8 +926,8 @@ async function renderDrawer() {
   const b = CURRENT_BOARD;
   const kps = STATE.data.knowledge_points[b.id] || [];
   const latestRun = (ci.runs || [])[0];
-  const pendingQ = latestRun ? latestRun.questions.filter(q => q.status === 'pending') : [];
-  const hasPendingReview = ci.status === 'pending_review' && pendingQ.length > 0;
+  const pendingQ = latestRun ? latestRun.questions.filter(q => q.status === 'pending' || q.status === 'rerun_requested') : [];
+  const hasPendingReview = (ci.status === 'pending_review' || ci.status === 'rerun_requested') && pendingQ.length > 0;
 
   let html = '';
 
@@ -1052,16 +1052,17 @@ async function renderDrawer() {
 }
 
 function wrongQuestionCard(q) {
-  const stateCls = q.status === 'confirmed' ? 'confirmed' : q.status === 'rejected' ? 'rejected' : '';
-  const isPending = q.status === 'pending';
+  const stateCls = q.status === 'confirmed' ? 'confirmed' : q.status === 'rejected' ? 'rejected' : q.status === 'rerun_requested' ? 'rerun' : '';
+  const stateText = q.status === 'confirmed' ? '✓ 已确认' : q.status === 'rejected' ? '✗ 已驳回' : q.status === 'rerun_requested' ? '🔄 待重新识别' : '待审';
+  const isPending = q.status === 'pending' || q.status === 'rerun_requested';
   return `<div class="wq-card ${stateCls}" data-q="${q.id}">
     <div class="wq-top">
       <div class="wq-content">${esc(q.content)}</div>
-      <span class="tag">${q.reviewed_at ? (q.status === 'confirmed' ? '✓ 已确认' : '✗ 已驳回') : '待审'}</span>
+      <span class="tag">${stateText}</span>
     </div>
     <div class="wq-answers">
-      <div>错答：<span class="wrong">${esc(q.student_answer || '—')}</span></div>
       <div>正解：<span class="right">${esc(q.correct_answer || '—')}</span></div>
+      ${q.student_answer ? `<div>错答：<span class="wrong">${esc(q.student_answer)}</span></div>` : ''}
     </div>
     <div class="wq-tags">
       ${q.error_type ? `<span class="tag">${esc(q.error_type)}</span>` : ''}
@@ -1071,6 +1072,7 @@ function wrongQuestionCard(q) {
     ${isPending ? `<div class="wq-actions">
       <button class="btn btn-success btn-sm" data-qact="confirm" data-qid="${q.id}">✓ 正确</button>
       <button class="btn btn-danger btn-sm" data-qact="reject" data-qid="${q.id}">✗ 识别有误</button>
+      <button class="btn btn-sm" data-qact="rerun" data-qid="${q.id}">🔄 重新识别</button>
     </div>
     <div id="rejectBox-${q.id}" style="display:none;margin-top:8px">
       <textarea id="rejectText-${q.id}" placeholder="说明哪里识别错了" style="width:100%;border:1px solid var(--border);border-radius:8px;padding:7px 10px;font-size:13px;min-height:56px;font-family:inherit"></textarea>
@@ -1173,6 +1175,11 @@ function bindDrawerEvents() {
           action: 'reject', comment: txt, member_id: STATE.member,
         });
         toast('已驳回');
+      } else if (act === 'rerun') {
+        const txt = prompt('请说明需要重新识别的点（可选）：');
+        if (txt === null) return;
+        await post(`/question/${qid}/request-rerun`, { comment: txt, member_id: STATE.member });
+        toast('🔄 已请求重新识别');
       } else if (act === 'undoReview') {
         await post(`/question/${qid}/undo-review`, { member_id: STATE.member });
         toast('↩ 已撤回这条审核');
@@ -1382,18 +1389,23 @@ document.addEventListener('DOMContentLoaded', () => {
           STATE.status = s;
           renderStatus();
           const cloudCommit = s.cloud && s.cloud.commit ? s.cloud.commit : null;
-          // 检测到云端版本已与 GitHub 对齐，即视为同步成功
+
+          // 云端已和 GitHub 对齐
           if (s.status === 'synced') {
             clearInterval(interval);
             if (syncBtn) {
               syncBtn.disabled = false;
               syncBtn.textContent = '⟳ 同步最新版';
             }
-            if (confirm('看板已更新到新版（' + (s.cloud && s.cloud.short || '?') + '），立即刷新？')) {
+            // 如果对齐后的版本和触发同步前一样，说明本来就已经是最新版
+            if (oldCommit && cloudCommit && cloudCommit === oldCommit) {
+              toast('✓ 当前云端版本已和 GitHub 对齐，无需同步');
+            } else if (confirm('看板已更新到新版（' + (s.cloud && s.cloud.short || '?') + '），立即刷新？')) {
               location.reload();
             }
             return;
           }
+
           // 云端版本发生变化但仍未对齐 GitHub：可能是 GitHub 没有更新
           if (oldCommit && cloudCommit && cloudCommit !== oldCommit) {
             clearInterval(interval);
@@ -1414,7 +1426,7 @@ document.addEventListener('DOMContentLoaded', () => {
           syncBtn.disabled = false;
           syncBtn.textContent = '⟳ 同步最新版';
         }
-        alert('同步等待超时。请稍后手动刷新页面，若仍未对齐请检查 GitHub 版本。');
+        alert('同步等待超时。可能的原因：\n1. 服务仍在重启，请过 30 秒手动刷新页面；\n2. GitHub 版本未 push；\n3. 若刷新后顶栏显示“已对齐”，则同步实际已成功。');
       }
     }, 3000);
   }
@@ -1424,9 +1436,53 @@ document.addEventListener('DOMContentLoaded', () => {
 
 /* ---------- 左右分屏错题审核弹窗 ---------- */
 let REVIEW_MODAL_DATA = null; // { checkin, questions }
+const RQE_UNDO = new Map();   // idx -> UndoManager
+
+class UndoManager {
+  constructor(el, max = 50) {
+    this.el = el;
+    this.stack = [];
+    this.idx = -1;
+    this.max = max;
+    this._lock = false;
+    this.save(true);
+    el.addEventListener('input', () => this.save());
+    el.addEventListener('keydown', e => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+        e.preventDefault();
+        e.shiftKey ? this.redo() : this.undo();
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') {
+        e.preventDefault();
+        this.redo();
+      }
+    });
+  }
+  save(force) {
+    if (this._lock) return;
+    const v = this.el.value;
+    if (!force && this.idx >= 0 && this.stack[this.idx] === v) return;
+    this.stack = this.stack.slice(0, this.idx + 1);
+    this.stack.push(v);
+    if (this.stack.length > this.max) this.stack.shift();
+    this.idx = this.stack.length - 1;
+  }
+  undo() {
+    if (this.idx > 0) { this.idx--; this._set(); }
+  }
+  redo() {
+    if (this.idx < this.stack.length - 1) { this.idx++; this._set(); }
+  }
+  _set() {
+    this._lock = true;
+    this.el.value = this.stack[this.idx];
+    this._lock = false;
+  }
+}
 
 function openReviewModal(ci) {
   REVIEW_MODAL_DATA = { checkin: ci, questions: JSON.parse(JSON.stringify((ci.runs || [])[0]?.questions || [])) };
+  RQE_UNDO.clear();
   renderReviewModal();
   document.getElementById('reviewModalMask').classList.add('show');
   document.getElementById('reviewModal').classList.add('show');
@@ -1436,17 +1492,18 @@ function closeReviewModal() {
   document.getElementById('reviewModalMask').classList.remove('show');
   document.getElementById('reviewModal').classList.remove('show');
   REVIEW_MODAL_DATA = null;
+  RQE_UNDO.clear();
 }
 
 function renderReviewModal() {
   const { checkin, questions } = REVIEW_MODAL_DATA;
   const board = CURRENT_BOARD;
-  const pending = questions.filter(q => q.status === 'pending').length;
+  const pending = questions.filter(q => q.status === 'pending' || q.status === 'rerun_requested').length;
 
   document.getElementById('reviewModalSubject').textContent = board?.subject || '科目';
   document.getElementById('reviewModalBoard').textContent = board?.name || '板块';
   document.getElementById('reviewModalMeta').textContent =
-    `${checkin.checkin_date} · ${checkin.photos.length} 张照片 · ${questions.length} 题 · 待审 ${pending} 题`;
+    `${checkin.checkin_date} · ${checkin.photos.length} 张照片 · ${questions.length} 题 · 待审/待重识别 ${pending} 题`;
 
   // 左侧照片区
   const left = document.getElementById('reviewModalLeft');
@@ -1466,30 +1523,30 @@ function renderReviewModal() {
   }
 
   let html = `<div class="rqe-print-hint">
-    💡 <b>使用提示</b>：左侧看原图，右侧改识别结果。「题目原文」保存印刷体（可打印给孩子重做），「学生当时写的答案」和「正确答案」分开填写。
+    💡 <b>使用提示</b>：左侧看原图，右侧改识别结果。「题目原文」必须从照片中原样提取印刷字，不要改写；「正确答案」可由 AI 给出候选，家长选择或手动修改；「学生当时写的答案」可选填。
   </div>`;
 
   questions.forEach((q, idx) => {
-    const stateCls = q.status === 'confirmed' ? 'confirmed' : q.status === 'rejected' ? 'rejected' : '';
-    const stateText = q.status === 'confirmed' ? '✓ 已确认' : q.status === 'rejected' ? '✗ 已驳回' : '待审';
+    const stateCls = q.status === 'confirmed' ? 'confirmed' : q.status === 'rejected' ? 'rejected' : q.status === 'rerun_requested' ? 'rerun' : '';
+    const stateText = q.status === 'confirmed' ? '✓ 已确认' : q.status === 'rejected' ? '✗ 已驳回' : q.status === 'rerun_requested' ? '🔄 待重新识别' : '待审';
+    const candidates = q.answer_candidates || [];
     html += `<div class="review-question-edit ${stateCls}" data-qidx="${idx}">
       <div class="rqe-header">
         <div><span class="rqe-num">${idx + 1}</span> <span class="rqe-status">${stateText}</span></div>
         <button class="btn btn-sm" data-ract="printSingle" data-qidx="${idx}">🖨 单题打印</button>
       </div>
       <div class="rqe-field">
-        <label>题目原文（印刷体，打印复习时只显示这部分）<span class="tip">可编辑</span></label>
+        <label>题目原文（必须从照片中原样提取印刷体，不要改写）<span class="tip">可编辑 · Ctrl+Z 撤销</span></label>
         <textarea id="rqe-content-${idx}">${esc(q.content)}</textarea>
       </div>
-      <div class="rqe-row">
-        <div class="rqe-field">
-          <label>学生当时写的答案 <span class="tip">可编辑</span></label>
-          <textarea id="rqe-stu-${idx}">${esc(q.student_answer || '')}</textarea>
-        </div>
-        <div class="rqe-field">
-          <label>正确答案 <span class="tip">可编辑</span></label>
-          <textarea id="rqe-ans-${idx}">${esc(q.correct_answer || '')}</textarea>
-        </div>
+      <div class="rqe-field rqe-optional">
+        <label>学生当时写的答案 <span class="tip">可选，用于了解孩子错在哪里</span></label>
+        <textarea id="rqe-stu-${idx}">${esc(q.student_answer || '')}</textarea>
+      </div>
+      <div class="rqe-field">
+        <label>正确答案 <span class="tip">下方有 AI 候选，可选择或手动修改</span></label>
+        ${renderAnswerCandidates(idx, candidates)}
+        <textarea id="rqe-ans-${idx}">${esc(q.correct_answer || '')}</textarea>
       </div>
       <div class="rqe-row">
         <div class="rqe-field">
@@ -1505,7 +1562,8 @@ function renderReviewModal() {
         <button class="btn btn-primary" data-ract="save" data-qidx="${idx}">💾 保存修改</button>
         <button class="btn btn-success" data-ract="confirm" data-qidx="${idx}">✓ 确认错题</button>
         <button class="btn btn-danger" data-ract="reject" data-qidx="${idx}">✗ 识别有误</button>
-        <button class="btn btn-sm" data-ract="blank" data-qidx="${idx}">⬜ 一键整理为印刷体（把答案处变空白）</button>
+        <button class="btn btn-sm" data-ract="rerun" data-qidx="${idx}">🔄 重新识别</button>
+        <button class="btn btn-sm" data-ract="blank" data-qidx="${idx}">⬜ 一键整理为印刷体</button>
       </div>
       ${q.review_comment ? `<div class="wq-comment">💬 ${esc(q.review_comment)}</div>` : ''}
     </div>`;
@@ -1513,7 +1571,29 @@ function renderReviewModal() {
 
   right.innerHTML = html;
 
-  // 绑定事件
+  // 绑定 UndoManager 到每个 textarea
+  questions.forEach((q, idx) => {
+    ['content', 'stu', 'ans'].forEach(suffix => {
+      const el = document.getElementById(`rqe-${suffix}-${idx}`);
+      if (el) RQE_UNDO.set(`${idx}-${suffix}`, new UndoManager(el));
+    });
+  });
+
+  // 绑定候选答案 radio：选中后回填到正确答案框
+  right.querySelectorAll('input[name^="rqe-cand-"]').forEach(radio => {
+    radio.onchange = () => {
+      const idx = parseInt(radio.dataset.qidx);
+      const value = radio.value;
+      const ansEl = document.getElementById(`rqe-ans-${idx}`);
+      const q = questions[idx];
+      const candidates = q.answer_candidates || [];
+      if (value === 'custom') return;
+      const c = candidates[parseInt(value)];
+      if (c && c.answer != null) ansEl.value = c.answer;
+    };
+  });
+
+  // 绑定操作按钮
   right.querySelectorAll('[data-ract]').forEach(btn => {
     btn.onclick = () => handleReviewModalAction(btn.dataset.ract, parseInt(btn.dataset.qidx));
   });
@@ -1524,13 +1604,35 @@ function renderReviewModal() {
   document.getElementById('reviewModalMask').onclick = closeReviewModal;
 }
 
+function renderAnswerCandidates(idx, candidates) {
+  if (!candidates || !candidates.length) return '';
+  const safe = arr => arr.map(c => esc(String(c.answer || ''))).filter(Boolean);
+  const vals = safe(candidates);
+  if (!vals.length) return '';
+  let html = `<div class="rqe-candidates">`;
+  candidates.forEach((c, i) => {
+    const label = c.source === 'web' ? '网络搜索答案' : (c.source === 'ai' ? 'AI 识别答案' : `候选 ${i + 1}`);
+    html += `<label class="rqe-candidate">
+      <input type="radio" name="rqe-cand-${idx}" value="${i}" data-qidx="${idx}">
+      <span><b>${esc(label)}</b>：${esc(String(c.answer || ''))}</span>
+    </label>`;
+  });
+  html += `<label class="rqe-candidate">
+    <input type="radio" name="rqe-cand-${idx}" value="custom" data-qidx="${idx}" checked>
+    <span><b>手动输入</b></span>
+  </label></div>`;
+  return html;
+}
+
 function getQuestionFormData(idx) {
+  const q = REVIEW_MODAL_DATA.questions[idx];
   return {
     content: document.getElementById(`rqe-content-${idx}`).value.trim(),
     student_answer: document.getElementById(`rqe-stu-${idx}`).value.trim(),
     correct_answer: document.getElementById(`rqe-ans-${idx}`).value.trim(),
     error_type: document.getElementById(`rqe-type-${idx}`).value.trim(),
     knowledge_point: document.getElementById(`rqe-kp-${idx}`).value.trim(),
+    answer_candidates: q.answer_candidates || [],
   };
 }
 
@@ -1544,7 +1646,6 @@ async function handleReviewModalAction(act, idx) {
     if (!r.ok) { toast('保存失败：' + (r.error || '未知')); return; }
     Object.assign(q, payload);
     toast('✓ 已保存');
-    // 同步刷新抽屉列表
     await loadState();
     await loadCheckin(checkin.id);
     renderDrawer();
@@ -1565,7 +1666,7 @@ async function handleReviewModalAction(act, idx) {
   }
 
   if (act === 'reject') {
-    const comment = prompt('请说明哪里识别错了（会打回给 AI 重跑）：');
+    const comment = prompt('请说明哪里识别错了（会记录并打回给 AI 重跑）：');
     if (comment === null) return;
     await post(`/question/${q.id}/update`, { ...getQuestionFormData(idx), member_id: STATE.member });
     const r = await post(`/question/${q.id}/review`, { action: 'reject', comment, member_id: STATE.member });
@@ -1573,6 +1674,21 @@ async function handleReviewModalAction(act, idx) {
     q.status = 'rejected';
     q.review_comment = comment;
     toast('✗ 已驳回');
+    await loadState();
+    await loadCheckin(checkin.id);
+    renderReviewModal();
+    renderDrawer();
+    return;
+  }
+
+  if (act === 'rerun') {
+    const comment = prompt('请说明需要重新识别的点（可选）：');
+    if (comment === null) return;
+    const r = await post(`/question/${q.id}/request-rerun`, { comment, member_id: STATE.member });
+    if (!r.ok) { toast('请求重新识别失败：' + (r.error || '未知')); return; }
+    q.status = 'rerun_requested';
+    q.review_comment = comment || '已请求重新识别';
+    toast('🔄 已请求重新识别，AI 处理后会更新');
     await loadState();
     await loadCheckin(checkin.id);
     renderReviewModal();
@@ -1592,6 +1708,7 @@ async function handleReviewModalAction(act, idx) {
     content = content.replace(/（[^）]{1,20}）/g, '（________）');
     content = content.replace(/\([^)]{1,20}\)/g, '(________)');
     contentEl.value = content;
+    RQE_UNDO.get(`${idx}-content`)?.save();
     toast('已把答案处替换为空白，请再检查题目是否通顺');
     return;
   }

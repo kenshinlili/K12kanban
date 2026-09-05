@@ -172,11 +172,19 @@ def get_conn():
     return conn
 
 
+def migrate_db(conn):
+    """对已有数据库做增量字段迁移（SQLite 不支持 IF NOT EXISTS ADD COLUMN）。"""
+    cols = [r['name'] for r in conn.execute('PRAGMA table_info(wrong_questions)').fetchall()]
+    if 'answer_candidates' not in cols:
+        conn.execute("ALTER TABLE wrong_questions ADD COLUMN answer_candidates TEXT")
+
+
 def init_db():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     conn = get_conn()
     try:
         conn.executescript(SCHEMA)
+        migrate_db(conn)
         # 种子成员
         for m in MEMBERS:
             conn.execute(
