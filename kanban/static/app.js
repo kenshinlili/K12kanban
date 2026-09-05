@@ -132,10 +132,12 @@ function renderStatus() {
   }
   el.style.display = '';
   // sync 按钮：只有 GitHub 领先才可点，否则禁用（防止误操作回退）
+  // 必须强制同步 textContent，否则 sync 流程设的「同步中…」会残留
   if (syncBtn) {
     const parentOnly = STATE.member === 'dad' || STATE.member === 'mom';
     const canSync = parentOnly && s.can_sync === true;
     syncBtn.disabled = !canSync;
+    syncBtn.textContent = canSync ? '⟳ 同步最新版' : '✓ 已对齐';
     syncBtn.title = canSync ? '从 GitHub 拉取最新代码并重启' : (s.warning || '当前无需同步');
   }
 }
@@ -1576,14 +1578,15 @@ document.addEventListener('DOMContentLoaded', () => {
           toast('已触发同步，后台拉取最新代码并重启…');
           pollVersion(r.old_version || null);
         } else {
-          toast('同步失败：' + ((r && r.error) || '未知错误'));
+          // 后端主线程守门拒绝（如 GitHub 未领先 / 已对齐）→ 立刻提示并恢复按钮
           syncBtn.disabled = false;
           syncBtn.textContent = '⟳ 同步最新版';
+          toast('⚠ 同步被阻止：' + ((r && r.error) || '未知错误'));
         }
       } catch (e) {
-        toast('同步请求异常：' + e);
         syncBtn.disabled = false;
         syncBtn.textContent = '⟳ 同步最新版';
+        toast('同步请求异常：' + e);
       }
     };
   }

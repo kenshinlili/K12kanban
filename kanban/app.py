@@ -526,6 +526,9 @@ def api_sync():
 
     采用异步 202：主线程立即返回'已接受'，后台线程完成下载→覆盖→重启，
     避免网关在等待下载/解压时超时返回 502。
+
+    主线程先做版本守门：GitHub 未领先（说明你本地还没 push）→ 立即 409，
+    不要让前端进入 120 秒空轮询。这是阻塞日常 sync 操作的常见坑。
     """
     member = request.args.get('member') or (request.get_json(silent=True) or {}).get('member')
     if member not in ('dad', 'mom'):
@@ -535,6 +538,28 @@ def api_sync():
     branch = os.environ.get('KANBAN_GITHUB_BRANCH', 'master')
     zip_url = f'https://codeload.github.com/{repo}/archive/refs/heads/{branch}.zip'
     repo_root = os.path.dirname(BASE_DIR)  # kanban-app/
+
+    # ---- 主线程守门：GitHub 未领先则直接 409，让前端立即知道原因 ----
+    try:
+        gh_head = fetch_github_head(repo, branch)
+        gh_date = gh_head.get('date')
+        cloud_date = VERSION.get('commit_date')
+        gh_commit = gh_head.get('commit') or 'unknown'
+        if gh_commit not in (None, 'unknown') and gh_commit == VERSION.get('commit'):
+            return jsonify({
+                'ok': False,
+                'error': f'当前云端已与 GitHub 对齐（{gh_commit[:12]}），无需同步',
+                'reason': 'already_synced',
+            }), 409
+        if gh_date and cloud_date and gh_date <= cloud_date:
+            cloud_short = VERSION.get('commit', 'unknown')[:12]
+            return jsonify({
+                'ok': False,
+                'error': f'GitHub 未领先云端（云端 {cloud_short} / GitHub {gh_commit[:12]}），请先在本地 GitHub Desktop push 最新 commit',
+                'reason': 'github_not_ahead',
+            }), 409
+    except Exception:
+        pass  # 守门失败不阻断，进入实际下载流程
 
     def _do_sync():
         """后台线程：下载 GitHub zip、覆盖代码（严禁触碰 instance/）、平滑重启。
