@@ -21,6 +21,8 @@ ENV/
 
 # Application data - keep all runtime data out of version control
 instance/
+.backup_tmp/
+.workbuddy/
 
 # OS
 .DS_Store
