@@ -725,3 +725,66 @@ body {
 .eth-row { display: flex; align-items: center; gap: 11px; background: #fff; border: 1px solid var(--border); border-radius: 9px; padding: 9px 13px; }
 .eth-label { font-weight: 700; font-size: 13px; }
 .eth-num { font-size: 16px; font-weight: 800; margin-left: auto; }
+
+/* ---------- 作业区（独立于每日打卡） ---------- */
+.hw-empty {
+  background: #fff; border: 1px dashed var(--border); border-radius: 11px;
+  padding: 16px 18px; color: var(--text-soft); font-size: 13px; line-height: 1.7;
+}
+.hw-list { display: flex; flex-direction: column; gap: 9px; }
+.hw-item {
+  background: var(--card); border: 1px solid var(--border); border-radius: 11px;
+  padding: 12px 14px; display: flex; justify-content: space-between; align-items: center;
+  gap: 12px; flex-wrap: wrap; box-shadow: var(--shadow);
+}
+.hw-item-main { flex: 1; min-width: 220px; }
+.hw-item-title { font-weight: 700; font-size: 14px; margin-bottom: 5px; }
+.hw-item-title b { color: var(--primary); }
+.hw-item-meta { font-size: 12.5px; color: var(--text-soft); display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+.hw-item-note { font-size: 12.5px; color: var(--text-soft); margin-top: 5px; }
+.hw-item-actions { display: flex; gap: 7px; flex: none; }
+
+/* 作业详情标签 */
+.hw-tag {
+  display: inline-block; background: #FFF5EB; color: #CC6600; border: 1px solid #fde2c4;
+  border-radius: 6px; font-size: 12px; padding: 3px 8px; margin-bottom: 10px;
+}
+
+/* ---------- 作业上传弹窗 ---------- */
+.hw-modal-mask {
+  position: fixed; inset: 0; background: rgba(15, 23, 42, .5);
+  opacity: 0; pointer-events: none; transition: opacity .2s; z-index: 130;
+}
+.hw-modal-mask.show { opacity: 1; pointer-events: auto; }
+.hw-modal {
+  position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%) scale(.96);
+  width: min(520px, 94vw); max-height: 86vh; background: #fff;
+  border-radius: 14px; box-shadow: var(--shadow-lg); z-index: 131;
+  display: flex; flex-direction: column; opacity: 0; pointer-events: none; transition: all .2s;
+}
+.hw-modal.show { opacity: 1; transform: translate(-50%, -50%) scale(1); pointer-events: auto; }
+.hw-modal-header {
+  padding: 14px 18px; border-bottom: 1px solid var(--border);
+  display: flex; justify-content: space-between; align-items: center;
+}
+.hw-modal-header h3 { font-size: 16px; }
+.hw-modal-body { flex: 1; overflow-y: auto; padding: 16px 18px; }
+.hw-modal-footer {
+  padding: 12px 18px; border-top: 1px solid var(--border);
+  display: flex; justify-content: flex-end; gap: 10px;
+}
+.field .tip { font-weight: 400; color: #9ca3af; margin-left: 4px; }
+
+/* ---------- 知识点台账：两级单元分组 ---------- */
+.kp-unit {
+  background: #fafbfc; border: 1px solid var(--border); border-radius: 10px;
+  padding: 9px 12px; margin-bottom: 9px;
+}
+.kp-unit-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.kp-unit-name { font-weight: 700; font-size: 13.5px; color: var(--text); }
+.kp-unit-count { font-size: 11.5px; color: var(--text-soft); }
+.kp-unit-del {
+  margin-left: auto; border: none; background: none; color: var(--text-soft);
+  cursor: pointer; font-size: 14px; line-height: 1; padding: 2px 4px;
+}
+.kp-unit-del:hover { color: var(--danger); }

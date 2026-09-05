@@ -52,6 +52,18 @@ if VERSION.get('short') in (None, 'unknown'):
 if VERSION.get('branch') in (None, 'unknown'):
     VERSION['branch'] = os.environ.get('KANBAN_BRANCH', 'unknown')
 
+# 语义化版本号（给人看）：从 VERSION 文件读取，随代码一起 git 管理
+# 格式 V主.次（V1.00 → V1.10 → ... → V2.12），手动在 VERSION 文件中递增
+SEMANTIC_VERSION = 'V0.00'
+try:
+    with open(os.path.join(BASE_DIR, 'VERSION'), encoding='utf-8') as _svf:
+        _sv = _svf.read().strip()
+        if _sv:
+            SEMANTIC_VERSION = _sv
+except Exception:
+    pass
+VERSION['semantic'] = SEMANTIC_VERSION
+
 app = Flask(__name__, static_folder=None)
 # 允许上传备份 zip（照片累积后可能较大，设 50MB）
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024
@@ -223,7 +235,7 @@ def api_state():
 
         for b in boards:
             ci = conn.execute(
-                'SELECT * FROM checkins WHERE board_id=? AND checkin_date=?',
+                "SELECT * FROM checkins WHERE board_id=? AND checkin_date=? AND entry_type='daily'",
                 (b['id'], date)).fetchone()
             if ci:
                 b['checkin'] = row2dict(ci)
@@ -252,6 +264,27 @@ def api_state():
                 b['pending_count'] = 0
                 b['run'] = None
 
+        # 作业列表（entry_type='homework'，独立于每日打卡，按完成日期倒序）
+        hw_rows = conn.execute('''
+            SELECT c.*, b.subject, b.name AS board_name
+            FROM checkins c JOIN boards b ON c.board_id = b.id
+            WHERE c.entry_type='homework'
+            ORDER BY c.checkin_date DESC, c.id DESC LIMIT 60
+        ''').fetchall()
+        homeworks = []
+        for r in hw_rows:
+            item = row2dict(r)
+            item['photo_count'] = conn.execute(
+                'SELECT COUNT(*) AS c FROM photos WHERE checkin_id=?', (r['id'],)).fetchone()['c']
+            run = conn.execute(
+                'SELECT * FROM ai_runs WHERE checkin_id=? ORDER BY version DESC LIMIT 1',
+                (r['id'],)).fetchone()
+            item['wrong_count'] = conn.execute(
+                "SELECT COUNT(*) AS c FROM wrong_questions WHERE run_id=? AND status='confirmed'",
+                (run['id'],)).fetchone()['c'] if run else 0
+            item['run'] = row2dict(run) if run else None
+            homeworks.append(item)
+
         # 待我处理的任务（流转给我的 + 待审核的）
         todo = []
         rows = conn.execute('''
@@ -273,14 +306,16 @@ def api_state():
 
         kp = {}
         for b in boards:
-            kp[b['id']] = [row2dict(x) for x in conn.execute(
-                'SELECT * FROM knowledge_points WHERE board_id=? AND active=1 ORDER BY sort_order',
-                (b['id'],)).fetchall()]
+            rows = conn.execute(
+                'SELECT * FROM knowledge_points WHERE board_id=? AND active=1 '
+                'ORDER BY sort_order, id', (b['id'],)).fetchall()
+            kp[b['id']] = [row2dict(x) for x in rows]
 
         return jsonify({
             'ok': True, 'date': date, 'member': member,
             'members': members, 'boards': boards,
             'knowledge_points': kp, 'todo': todo,
+            'homeworks': homeworks,
         })
     finally:
         conn.close()
@@ -385,7 +420,10 @@ _GITHUB_STATUS_CACHE = (0, None)
 
 
 def fetch_github_head(repo='kenshinlili/K12kanban', branch='master'):
-    """查询 GitHub 指定分支最新 commit，带 30 秒本地缓存。"""
+    """查询 GitHub 指定分支最新 commit（含提交时间），带 30 秒本地缓存。
+
+    返回 commit/short/date（commit 的提交时间 ISO8601），date 用于 sync 守门判断新旧。
+    """
     global _GITHUB_STATUS_CACHE
     now = time.time()
     if now - _GITHUB_STATUS_CACHE[0] < 30 and _GITHUB_STATUS_CACHE[1] is not None:
@@ -394,10 +432,16 @@ def fetch_github_head(repo='kenshinlili/K12kanban', branch='master'):
     try:
         with urllib.request.urlopen(url, timeout=10) as resp:
             data = json.loads(resp.read().decode('utf-8'))
+            commit_date = None
+            try:
+                commit_date = data['commit']['committer']['date']
+            except Exception:
+                pass
             result = {
                 'commit': data.get('sha', 'unknown'),
                 'short': (data.get('sha') or 'unknown')[:12],
                 'branch': branch,
+                'date': commit_date,
             }
             _GITHUB_STATUS_CACHE = (now, result)
             return result
@@ -415,19 +459,25 @@ def api_version():
 
 @app.route('/api/status')
 def api_status():
-    """返回云端版本与 GitHub 最新版本的对齐状态，用于判断是否需要 sync。"""
+    """返回云端版本与 GitHub 最新版本的对齐状态，用于判断是否需要 sync。
+
+    判断依据（按时间）：GitHub commit 时间 vs 云端 version.json 的 commit 时间。
+    - 云端 commit_date 存于 version.json（sync 成功后写入 GitHub 的 date）
+    - 只有 GitHub 的 commit 时间更新时，才建议/允许同步
+    """
     gh = fetch_github_head()
     cloud_commit = VERSION.get('commit', 'unknown')
+    cloud_date = VERSION.get('commit_date')
     gh_commit = gh.get('commit', 'unknown')
+    gh_date = gh.get('date')
     cloud_short = cloud_commit[:12] if cloud_commit != 'unknown' else 'unknown'
     gh_short = gh_commit[:12] if gh_commit != 'unknown' else 'unknown'
 
     if cloud_commit == 'unknown':
         status = 'unknown'
-        can_sync = False
-        warning = '无法获取云端版本信息'
+        can_sync = True
+        warning = '无法获取云端版本信息，可尝试同步'
     elif gh_commit == 'unknown':
-        # GitHub API 可能因网络/TLS 不可达，但不阻止用户触发 sync（后端会实际拉取代码）
         status = 'unknown'
         can_sync = True
         warning = 'GitHub 状态暂时获取不到，点击同步后由后端直接尝试拉取'
@@ -435,6 +485,11 @@ def api_status():
         status = 'synced'
         can_sync = False
         warning = '当前云端版本已和 GitHub 对齐，无需同步'
+    elif gh_date and cloud_date and gh_date <= cloud_date:
+        # GitHub 的提交时间不晚于云端 → GitHub 没有领先，禁止同步
+        status = 'diverged'
+        can_sync = False
+        warning = f'GitHub({gh_short}) 未领先云端({cloud_short})，禁止同步'
     else:
         status = 'diverged'
         can_sync = True
@@ -442,7 +497,7 @@ def api_status():
 
     return jsonify({
         'ok': True,
-        'cloud': {'commit': cloud_commit, 'short': cloud_short},
+        'cloud': {'commit': cloud_commit, 'short': cloud_short, 'date': cloud_date},
         'github': gh,
         'status': status,          # synced / diverged / unknown
         'can_sync': can_sync,
@@ -486,6 +541,9 @@ def api_sync():
 
         数据保护铁律（项目第一原则）：用户数据 INSTANCE_DIR 是不可变资产，
         任何代码更新（本函数）都不得读取、删除或覆盖它。违反即中止重启、保留旧服务。
+
+        版本守门铁律：覆盖前先比较 GitHub commit 时间 vs 云端 commit 时间，
+        只有 GitHub 领先时才允许覆盖；否则直接中止，防止把云端代码拉回旧版。
         """
         import tempfile
         import subprocess
@@ -494,6 +552,21 @@ def api_sync():
         instance_present_before = os.path.isdir(instance_dir)
         tmpdir = tempfile.mkdtemp()
         try:
+            # ---- 版本守门：GitHub 未领先则中止 ----
+            try:
+                gh_head = fetch_github_head(repo, branch)
+                gh_date = gh_head.get('date')
+                cloud_date = VERSION.get('commit_date')
+                if (gh_head.get('commit') not in (None, 'unknown')
+                        and gh_head.get('commit') == VERSION.get('commit')):
+                    _log.warning('[sync] 云端已与 GitHub 对齐，跳过覆盖')
+                    return
+                if gh_date and cloud_date and gh_date <= cloud_date:
+                    _log.warning('[sync] GitHub 未领先云端，中止同步（防止回退）')
+                    return
+            except Exception:
+                pass  # 守门判断异常不阻断，交给实际下载流程决定
+
             zpath = os.path.join(tmpdir, 'repo.zip')
             urllib.request.urlretrieve(zip_url, zpath)
             with zipfile.ZipFile(zpath) as zf:
@@ -515,7 +588,7 @@ def api_sync():
                     if f == '.gitkeep':
                         continue
                     shutil.copy2(os.path.join(root, f), os.path.join(target_root, f))
-            # 同步成功后立即更新 version.json 为 GitHub HEAD commit，
+            # 同步成功后立即更新 version.json 为 GitHub HEAD commit + 时间，
             # 确保重启后 /api/version 与 /api/status 能正确对齐
             try:
                 gh_head = fetch_github_head(repo, branch)
@@ -525,6 +598,7 @@ def api_sync():
                             'commit': gh_head['commit'],
                             'short': gh_head['short'],
                             'branch': branch,
+                            'commit_date': gh_head.get('date'),
                             'built_at': datetime.now().isoformat(timespec='seconds'),
                         }, _vf, ensure_ascii=False, indent=2)
             except Exception:
@@ -560,29 +634,39 @@ def api_checkin():
     duration = data.get('duration_min')
     note = (data.get('note') or '').strip()
     kp_id = data.get('knowledge_point_id')
+    entry_type = data.get('entry_type') or 'daily'   # daily 打卡 | homework 作业
 
     if not board_id:
         return jsonify({'ok': False, 'error': 'board_id required'}), 400
 
     conn = db.get_conn()
     try:
-        existing = conn.execute(
-            'SELECT * FROM checkins WHERE board_id=? AND checkin_date=?',
-            (board_id, date)).fetchone()
-        if existing:
-            return jsonify({'ok': False, 'error': '今日已打卡'}), 409
+        # 每日打卡（daily）：同一板块同一天只能一条
+        if entry_type == 'daily':
+            existing = conn.execute(
+                "SELECT * FROM checkins WHERE board_id=? AND checkin_date=? AND entry_type='daily'",
+                (board_id, date)).fetchone()
+            if existing:
+                return jsonify({'ok': False, 'error': '今日已打卡'}), 409
 
         kp_name = None
         if kp_id:
             kp = conn.execute('SELECT * FROM knowledge_points WHERE id=?', (kp_id,)).fetchone()
-            kp_name = kp['name'] if kp else None
+            if kp:
+                kp_name = kp['name']
+                # 若 kp 是二级（有 parent），把父级名也带上，便于识别归属
+                if kp['parent_id']:
+                    parent = conn.execute(
+                        'SELECT name FROM knowledge_points WHERE id=?', (kp['parent_id'],)).fetchone()
+                    if parent:
+                        kp_name = f"{parent['name']}·{kp['name']}"
 
         full_note = f'[{kp_name}] {note}' if kp_name else note
         cur = conn.execute(
-            'INSERT INTO checkins (board_id, member_id, checkin_date, duration_min, note, '
-            'status, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)',
-            (board_id, member_id, date, duration, full_note, 'pending_ai',
-             db.now_str(), db.now_str()))
+            'INSERT INTO checkins (board_id, member_id, checkin_date, entry_type, kp_id, kp_name, '
+            'duration_min, note, status, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
+            (board_id, member_id, date, entry_type, kp_id, kp_name,
+             duration, full_note, 'pending_ai', db.now_str(), db.now_str()))
         cid = cur.lastrowid
         log_action(conn, cid, None, member_id, 'checkin', note)
         conn.commit()
@@ -622,7 +706,7 @@ def api_checkin_delete(cid):
 
 @app.route('/api/checkin/<int:cid>', methods=['PATCH'])
 def api_checkin_patch(cid):
-    """更新时长 / 备注"""
+    """更新时长 / 备注 / 知识点"""
     data = request.get_json() or {}
     conn = db.get_conn()
     try:
@@ -631,9 +715,25 @@ def api_checkin_patch(cid):
             return jsonify({'ok': False, 'error': 'not found'}), 404
         duration = data.get('duration_min', ci['duration_min'])
         note = data.get('note', ci['note'])
+
+        kp_id = data.get('kp_id', ci['kp_id'])
+        kp_name = ci['kp_name']
+        if 'kp_id' in data:
+            if data['kp_id']:
+                kp = conn.execute('SELECT * FROM knowledge_points WHERE id=?', (data['kp_id'],)).fetchone()
+                if kp:
+                    kp_name = kp['name']
+                    if kp['parent_id']:
+                        parent = conn.execute(
+                            'SELECT name FROM knowledge_points WHERE id=?', (kp['parent_id'],)).fetchone()
+                        if parent:
+                            kp_name = f"{parent['name']}·{kp['name']}"
+            else:
+                kp_name = None
+
         conn.execute(
-            'UPDATE checkins SET duration_min=?, note=?, updated_at=? WHERE id=?',
-            (duration, note, db.now_str(), cid))
+            'UPDATE checkins SET duration_min=?, note=?, kp_id=?, kp_name=?, updated_at=? WHERE id=?',
+            (duration, note, kp_id, kp_name, db.now_str(), cid))
         conn.commit()
         return jsonify({'ok': True})
     finally:
@@ -1399,19 +1499,21 @@ def api_knowledge_points(board_id):
 
         data = request.get_json() or {}
         name = (data.get('name') or '').strip()
+        parent_id = data.get('parent_id')  # 可选：挂到某个一级「单元」下
         if not name:
             return jsonify({'ok': False, 'error': 'name required'}), 400
         mx = conn.execute(
-            'SELECT COALESCE(MAX(sort_order),0) AS m FROM knowledge_points WHERE board_id=?',
-            (board_id,)).fetchone()['m']
+            'SELECT COALESCE(MAX(sort_order),0) AS m FROM knowledge_points '
+            'WHERE board_id=? AND parent_id IS ?',
+            (board_id, parent_id)).fetchone()['m']
         exists = conn.execute(
-            'SELECT 1 FROM knowledge_points WHERE board_id=? AND name=?',
-            (board_id, name)).fetchone()
+            'SELECT 1 FROM knowledge_points WHERE board_id=? AND name=? AND parent_id IS ?',
+            (board_id, name, parent_id)).fetchone()
         if exists:
             return jsonify({'ok': False, 'error': '已存在'}), 409
         cur = conn.execute(
-            'INSERT INTO knowledge_points (board_id, name, sort_order) VALUES (?,?,?)',
-            (board_id, name, mx + 1))
+            'INSERT INTO knowledge_points (board_id, name, parent_id, sort_order) VALUES (?,?,?,?)',
+            (board_id, name, parent_id, mx + 1))
         conn.commit()
         return jsonify({'ok': True, 'id': cur.lastrowid})
     finally:
@@ -1423,6 +1525,8 @@ def api_knowledge_point(kid):
     conn = db.get_conn()
     try:
         if request.method == 'DELETE':
+            # 删除单元（父级）时级联删除其下所有子级知识点
+            conn.execute('DELETE FROM knowledge_points WHERE parent_id=?', (kid,))
             conn.execute('DELETE FROM knowledge_points WHERE id=?', (kid,))
             conn.commit()
             return jsonify({'ok': True})

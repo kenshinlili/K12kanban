@@ -100,6 +100,43 @@
   </div>
 </div>
 
+<!-- 作业上传弹窗（按知识点，可滞后补交） -->
+<div class="hw-modal-mask" id="hwModalMask"></div>
+<div class="hw-modal" id="hwModal">
+  <div class="hw-modal-header">
+    <h3>📚 上传作业</h3>
+    <button class="icon-btn" id="btnCloseHwModal">✕</button>
+  </div>
+  <div class="hw-modal-body">
+    <div class="field">
+      <label>科目板块 <span class="tip">（练习册 / 听写 / 作文等）</span></label>
+      <select id="hwBoard"></select>
+    </div>
+    <div class="field">
+      <label>知识点 <span class="tip">（按校内目录，如「第一单元 · 1 观潮」）</span></label>
+      <select id="hwKp"><option value="">未指定</option></select>
+    </div>
+    <div class="field">
+      <label>作业完成日期 <span class="tip">（滞后补交：交老师批改后上传，日期可早于今天）</span></label>
+      <input type="date" id="hwDate">
+    </div>
+    <div class="field">
+      <label>备注（可选）</label>
+      <textarea id="hwNote" placeholder="如：练习册 P12-P15，第3题空着没做"></textarea>
+    </div>
+    <div class="field">
+      <label>作业照片</label>
+      <div class="photo-grid" id="hwPhotoPreview"></div>
+      <input type="file" id="hwPhotoInput" accept="image/*" multiple capture="environment" style="display:none">
+      <button class="btn btn-sm" id="btnHwPickPhoto" style="margin-top:8px">＋ 选择照片</button>
+    </div>
+  </div>
+  <div class="hw-modal-footer">
+    <button class="btn" id="btnCancelHw">取消</button>
+    <button class="btn btn-primary" id="btnSubmitHw">上传作业</button>
+  </div>
+</div>
+
 <!-- 提示 -->
 <div class="toast" id="toast"></div>
 

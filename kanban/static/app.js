@@ -96,10 +96,13 @@ function renderMembers() {
   if (syncBtn) syncBtn.style.display = (STATE.member === 'dad' || STATE.member === 'mom') ? '' : 'none';
   const restoreBtn = document.getElementById('restoreBtn');
   if (restoreBtn) restoreBtn.style.display = (STATE.member === 'dad' || STATE.member === 'mom') ? '' : 'none';
-  // 显示当前版本号（任何身份）
+  // 显示当前版本号（任何身份）：语义化版本 + commit hash 前缀
   const verEl = document.getElementById('versionInfo');
-  if (verEl && STATE.version && STATE.version.short) {
-    verEl.textContent = 'v' + STATE.version.short;
+  if (verEl && STATE.version) {
+    const sem = STATE.version.semantic || ('v' + (STATE.version.short || '?'));
+    const hash = STATE.version.short ? STATE.version.short.slice(0, 7) : '';
+    verEl.textContent = hash ? `${sem} · ${hash}` : sem;
+    verEl.title = `commit: ${STATE.version.commit || '?'}\nbranch: ${STATE.version.branch || '?'}\nbuilt: ${STATE.version.built_at || '?'}`;
     verEl.style.display = '';
   }
   renderStatus();
@@ -107,21 +110,34 @@ function renderMembers() {
 
 function renderStatus() {
   const el = document.getElementById('statusInfo');
+  const syncBtn = document.getElementById('syncBtn');
   if (!el || !STATE.status) return;
   const s = STATE.status;
   const cloud = s.cloud && s.cloud.short ? s.cloud.short : '?';
   const github = s.github && s.github.short ? s.github.short : '?';
   if (s.status === 'synced') {
-    el.textContent = `云端=${cloud} 已对齐 GitHub=${github}`;
+    el.textContent = `已对齐 GitHub=${github}`;
     el.className = 'status-info synced';
   } else if (s.status === 'diverged') {
-    el.textContent = `云端=${cloud} ≠ GitHub=${github}`;
-    el.className = 'status-info diverged';
+    if (s.can_sync) {
+      el.textContent = `GitHub(${github}) 领先，可同步`;
+      el.className = 'status-info diverged';
+    } else {
+      el.textContent = `GitHub(${github}) 未领先云端(${cloud})`;
+      el.className = 'status-info unknown';
+    }
   } else {
     el.textContent = '版本状态未知';
     el.className = 'status-info unknown';
   }
   el.style.display = '';
+  // sync 按钮：只有 GitHub 领先才可点，否则禁用（防止误操作回退）
+  if (syncBtn) {
+    const parentOnly = STATE.member === 'dad' || STATE.member === 'mom';
+    const canSync = parentOnly && s.can_sync === true;
+    syncBtn.disabled = !canSync;
+    syncBtn.title = canSync ? '从 GitHub 拉取最新代码并重启' : (s.warning || '当前无需同步');
+  }
 }
 
 function renderKanban() {
@@ -138,6 +154,8 @@ function renderKanban() {
       <div class="board-grid">${groups[sub].map(boardCard).join('')}</div>
     </div>`;
   });
+  // 作业区：独立于每日打卡，按知识点上传（可滞后补交）
+  html += renderHomeworkZone();
   container.innerHTML = html;
   container.querySelectorAll('.board-card').forEach(card => {
     card.onclick = e => {
@@ -148,15 +166,38 @@ function renderKanban() {
   container.querySelectorAll('[data-act]').forEach(btn => {
     btn.onclick = e => {
       e.stopPropagation();
-      const boardId = btn.closest('.board-card').dataset.board;
+      const boardId = btn.closest('.board-card')?.dataset.board;
       const act = btn.dataset.act;
-      if (act === 'checkin') openBoard(boardId, true);
+      if (act === 'checkin') quickCheckin(boardId);
       else if (act === 'skip') skipBoard(boardId);
       else if (act === 'open') openBoard(boardId);
       else if (act === 'undo') undoCheckin(boardId);
       else if (act === 'review') openBoard(boardId);
+      else if (act === 'upload-hw') openHomeworkModal(boardId);
     };
   });
+  // 作业列表按钮
+  container.querySelectorAll('[data-hw]').forEach(btn => {
+    btn.onclick = e => {
+      e.stopPropagation();
+      const cid = btn.dataset.hw;
+      if (btn.dataset.hwAct === 'open') openCheckin(cid);
+      else if (btn.dataset.hwAct === 'del') delHomework(cid);
+    };
+  });
+  const hwUploadBtn = container.querySelector('#btnUploadHomework');
+  if (hwUploadBtn) hwUploadBtn.onclick = () => openHomeworkModal(null);
+}
+
+/* 每日打卡：只记录完成时间，不强制选知识点/照片 */
+async function quickCheckin(boardId) {
+  const r = await post('/checkin', {
+    board_id: boardId, member_id: STATE.member, date: STATE.date,
+    entry_type: 'daily', duration_min: null, note: '',
+  });
+  if (!r.ok) { toast(r.error || '打卡失败'); return; }
+  toast('✓ 已完成（' + new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) + '）');
+  await loadState();
 }
 
 async function skipBoard(boardId) {
@@ -175,7 +216,7 @@ function boardCard(b) {
   const kpTag = `<span class="tag ${b.track_mode === '单元' ? 'unit' : 'topic'}">${b.track_mode}</span>`;
   const orgTag = `<span class="tag ${b.org_type === '校内' ? 'school' : 'outside'}">${b.org_type}</span>`;
 
-  // ---------- 未打卡：显示空心 ☑ + 「今日无任务」 ----------
+  // ---------- 未打卡：只打卡（完成/无任务）+ 传作业 ----------
   if (!ci) {
     return `<div class="board-card" data-board="${b.id}">
       <div class="bc-head">
@@ -187,13 +228,17 @@ function boardCard(b) {
         <button class="btn btn-check" data-act="checkin">☐ 今日完成</button>
         <button class="btn btn-skip btn-sm" data-act="skip">— 今日无任务</button>
       </div>
+      <div class="bc-actions" style="margin-top:6px">
+        <button class="btn btn-sm" data-act="upload-hw">📷 传作业</button>
+      </div>
     </div>`;
   }
 
   const st = ci.status;
   const needAttention = ['pending_review', 'rerun_requested', 'transferred'].includes(st);
-  let meta = `<span>⏱ ${ci.duration_min ? ci.duration_min + ' 分钟' : '未填时长'}</span>`;
-  meta += `<span>📷 ${b.photo_count} 张</span>`;
+  let meta = `<span>✓ ${ci.updated_at ? ci.updated_at.slice(11, 16) : ''}</span>`;
+  if (ci.duration_min) meta += `<span>⏱ ${ci.duration_min} 分钟</span>`;
+  if (b.photo_count > 0) meta += `<span>📷 ${b.photo_count} 张</span>`;
   if (b.wrong_count > 0) meta += `<span>❌ ${b.wrong_count} 题</span>`;
   if (ci.note && st !== 'skipped') meta += `<span>📝 ${esc(ci.note)}</span>`;
 
@@ -201,7 +246,6 @@ function boardCard(b) {
   let statusBadge = '';
   let actions = '';
   if (st === 'skipped') {
-    // 今日无任务：灰色勾 + 撤销
     statusBadge = `<span class="status-pill sp-skipped">— 今日无任务</span>`;
     actions = `<button class="btn btn-danger btn-sm" data-act="undo">↩ 返回</button>`;
   } else {
@@ -224,6 +268,140 @@ function boardCard(b) {
     <div>${statusBadge}</div>
     <div class="bc-actions">${actions}</div>
   </div>`;
+}
+
+/* ---------- 作业区（独立于每日打卡） ---------- */
+function renderHomeworkZone() {
+  const hws = STATE.data.homeworks || [];
+  const hwMap = {
+    pending_ai: '待识别', pending_review: '待审核', rerun_requested: '待重跑',
+    confirmed: '已入库', skipped: '已跳过',
+  };
+  let html = `<div class="subject-group">
+    <div class="subject-title" style="margin-top:10px">
+      <span class="dot" style="background:#CC6600"></span>📚 作业（按知识点上传 · 可滞后补交）
+      <button class="btn btn-sm" id="btnUploadHomework" style="margin-left:auto">＋ 上传作业</button>
+    </div>`;
+
+  if (!hws.length) {
+    html += `<div class="hw-empty">还没有上传作业。孩子做完交给老师批改后，可在这里按知识点补传作业照片，AI 会自动识别错题。</div>`;
+  } else {
+    html += `<div class="hw-list">`;
+    hws.forEach(h => {
+      const st = h.status;
+      const pillCls = st === 'confirmed' ? 'sp-confirmed' : st === 'pending_review' ? 'sp-pending_review' : st === 'pending_ai' ? 'sp-pending_ai' : 'sp-rerun_requested';
+      html += `<div class="hw-item">
+        <div class="hw-item-main">
+          <div class="hw-item-title">${esc(h.subject)} · ${esc(h.board_name)}${h.kp_name ? ' · <b>' + esc(h.kp_name) + '</b>' : ''}</div>
+          <div class="hw-item-meta">
+            <span>📅 ${h.checkin_date}</span>
+            <span>📷 ${h.photo_count} 张</span>
+            ${h.wrong_count ? `<span>❌ ${h.wrong_count} 题</span>` : ''}
+            <span class="status-pill ${pillCls}">${hwMap[st] || st}</span>
+          </div>
+          ${h.note ? `<div class="hw-item-note">📝 ${esc(h.note)}</div>` : ''}
+        </div>
+        <div class="hw-item-actions">
+          <button class="btn btn-sm" data-hw="${h.id}" data-hw-act="open">查看</button>
+          <button class="btn btn-danger btn-sm" data-hw="${h.id}" data-hw-act="del">删除</button>
+        </div>
+      </div>`;
+    });
+    html += `</div>`;
+  }
+  html += `</div>`;
+  return html;
+}
+
+async function delHomework(cid) {
+  if (!confirm('确定删除这条作业记录？照片和识别结果会一并删除。')) return;
+  const r = await del(`/checkin/${cid}?member_id=${STATE.member}`);
+  if (r.ok) { toast('已删除'); await loadState(); }
+  else toast(r.error || '删除失败');
+}
+
+/* ---------- 作业上传弹窗 ---------- */
+let HW_PHOTOS = [];   // 待上传的 File 列表
+
+function openHomeworkModal(boardId) {
+  HW_PHOTOS = [];
+  const boardSel = document.getElementById('hwBoard');
+  const kpSel = document.getElementById('hwKp');
+  // 板块选项
+  const groups = {};
+  STATE.data.boards.forEach(b => (groups[b.subject] = groups[b.subject] || []).push(b));
+  boardSel.innerHTML = `<option value="">选择板块</option>` + SUBJECT_ORDER.map(sub =>
+    groups[sub] ? `<optgroup label="${sub}">${groups[sub].map(b =>
+      `<option value="${b.id}" ${b.id === boardId ? 'selected' : ''}>${esc(b.name)}</option>`).join('')}</optgroup>` : ''
+  ).join('');
+
+  // 知识点联动
+  function fillKp(boardId) {
+    const b = STATE.data.boards.find(x => x.id === boardId);
+    if (!b) { kpSel.innerHTML = '<option value="">未指定</option>'; return; }
+    const kps = STATE.data.knowledge_points[b.id] || [];
+    const parents = kps.filter(k => !k.parent_id);
+    kpSel.innerHTML = `<option value="">未指定</option>` + parents.map(p => {
+      const kids = kps.filter(k => k.parent_id === p.id);
+      if (!kids.length) return `<option value="${p.id}">${esc(p.name)}</option>`;
+      return `<optgroup label="${esc(p.name)}">${kids.map(k =>
+        `<option value="${k.id}">${esc(k.name)}</option>`).join('')}</optgroup>`;
+    }).join('');
+  }
+  boardSel.onchange = () => fillKp(boardSel.value);
+  fillKp(boardId || boardSel.value);
+
+  // 日期默认今天
+  document.getElementById('hwDate').value = STATE.date || todayStr();
+  document.getElementById('hwNote').value = '';
+  renderHwPhotoPreview();
+
+  document.getElementById('hwModal').classList.add('show');
+  document.getElementById('hwModalMask').classList.add('show');
+}
+
+function renderHwPhotoPreview() {
+  const box = document.getElementById('hwPhotoPreview');
+  box.innerHTML = HW_PHOTOS.map((f, i) => `<div class="photo-item">
+    <img src="${URL.createObjectURL(f)}">
+    <button class="photo-del" data-hwdel="${i}">×</button>
+  </div>`).join('');
+  box.querySelectorAll('[data-hwdel]').forEach(btn => {
+    btn.onclick = () => { HW_PHOTOS.splice(parseInt(btn.dataset.hwdel), 1); renderHwPhotoPreview(); };
+  });
+}
+
+function closeHomeworkModal() {
+  document.getElementById('hwModal').classList.remove('show');
+  document.getElementById('hwModalMask').classList.remove('show');
+  HW_PHOTOS = [];
+}
+
+async function submitHomework() {
+  const boardId = document.getElementById('hwBoard').value;
+  const kpId = document.getElementById('hwKp').value;
+  const date = document.getElementById('hwDate').value;
+  const note = document.getElementById('hwNote').value;
+  if (!boardId) { toast('请选择板块'); return; }
+  if (!date) { toast('请选择完成日期'); return; }
+
+  const r = await post('/checkin', {
+    board_id: boardId, member_id: STATE.member, date,
+    entry_type: 'homework', knowledge_point_id: kpId || null,
+    duration_min: null, note,
+  });
+  if (!r.ok) { toast(r.error || '创建作业失败'); return; }
+  const cid = r.checkin_id;
+
+  // 上传照片（如有）
+  if (HW_PHOTOS.length) {
+    const fd = new FormData();
+    HW_PHOTOS.forEach(f => fd.append('files', f));
+    await fetch(`${API}/checkin/${cid}/photos`, { method: 'POST', body: fd });
+  }
+  closeHomeworkModal();
+  toast(HW_PHOTOS.length ? '作业已上传，AI 将识别错题' : '作业已记录');
+  await loadState();
 }
 
 async function renderTodo() {
@@ -644,17 +822,39 @@ async function renderKnowledge() {
         <span class="dot ${SUBJECT_CLASS[sub]}"></span>${sub}</div>`;
       bs.forEach(b => {
         const kps = STATE.data.knowledge_points[b.id] || [];
+        const parents = kps.filter(k => !k.parent_id);
+        const childrenOf = pid => kps.filter(k => k.parent_id === pid);
         h += `<div class="kp-board">
           <div class="kp-title">${esc(b.name)}
             <span class="tag ${b.org_type === '校内' ? 'school' : 'outside'}">${b.org_type}</span>
             <span class="tag ${b.track_mode === '单元' ? 'unit' : 'topic'}">按${b.track_mode}</span>
-          </div>
-          <div class="kp-list" data-kpboard="${b.id}">
+          </div>`;
+        if (parents.length) {
+          // 两级：单元 → 课文
+          h += parents.map(p => {
+            const kids = childrenOf(p.id);
+            return `<div class="kp-unit">
+              <div class="kp-unit-head">
+                <span class="kp-unit-name">${esc(p.name)}</span>
+                <span class="kp-unit-count">${kids.length} 项</span>
+                <button class="kp-unit-del" data-kpdel="${p.id}" title="删除整个单元">✕</button>
+              </div>
+              ${kids.length ? `<div class="kp-list">${kids.map(k =>
+                `<div class="kp-chip">${esc(k.name)}
+                  <button class="del" data-kpdel="${k.id}" title="删除">×</button></div>`).join('')}
+                <button class="kp-add" data-kpadd="${b.id}" data-kpparent="${p.id}">+ 加课文</button>
+              </div>` : `<div class="kp-list"><button class="kp-add" data-kpadd="${b.id}" data-kpparent="${p.id}">+ 加课文</button></div>`}
+            </div>`;
+          }).join('');
+        } else {
+          // 扁平板块（校外/数学/英语）
+          h += `<div class="kp-list" data-kpboard="${b.id}">
             ${kps.map(k => `<div class="kp-chip">${esc(k.name)}
               <button class="del" data-kpdel="${k.id}" title="删除">×</button></div>`).join('')}
-            <button class="kp-add" data-kpadd="${b.id}">+ 新增${b.track_mode}</button>
-          </div>
-        </div>`;
+            <button class="kp-add" data-kpadd="${b.id}">+ 新增</button>
+          </div>`;
+        }
+        h += `</div>`;
       });
       h += `</div>`;
     });
@@ -803,9 +1003,15 @@ async function renderKnowledge() {
     document.querySelectorAll('[data-kpadd]').forEach(btn => {
       btn.onclick = async () => {
         const board = boards.find(b => b.id === btn.dataset.kpadd);
-        const name = prompt(`新增${board.track_mode}名称（如：${board.track_mode === '单元' ? '第九单元' : '行程问题'}）`);
+        const parentId = btn.dataset.kpparent || null;
+        const isUnitBoard = board.track_mode === '单元';
+        const label = parentId ? '课文/活动名称' : (isUnitBoard ? '单元名称' : '知识点名称');
+        const example = parentId ? '如：28 蟋蟀的住宅' : (isUnitBoard ? '如：第九单元' : '如：行程问题');
+        const name = prompt(`新增${label}（${example}）`);
         if (!name || !name.trim()) return;
-        const r = await post(`/board/${board.id}/knowledge-points`, { name: name.trim() });
+        const r = await post(`/board/${board.id}/knowledge-points`, {
+          name: name.trim(), parent_id: parentId ? parseInt(parentId) : null,
+        });
         if (r.ok) { toast('已添加'); await loadState(); }
         else toast(r.error || '添加失败');
       };
@@ -813,10 +1019,15 @@ async function renderKnowledge() {
     document.querySelectorAll('[data-kpdel]').forEach(btn => {
       btn.onclick = async e => {
         e.stopPropagation();
-        if (!confirm('确定删除这个知识点/单元？')) return;
-        await del(`/knowledge-point/${btn.dataset.kpdel}`);
-        await loadState();
-        toast('已删除');
+        const kid = btn.dataset.kpdel;
+        const isUnit = btn.classList.contains('kp-unit-del');
+        const msg = isUnit
+          ? '确定删除整个单元及其下所有课文/活动？（不影响已打卡记录）'
+          : '确定删除这个知识点/课文？';
+        if (!confirm(msg)) return;
+        const r = await del(`/knowledge-point/${kid}`);
+        if (r.ok) { toast('已删除'); await loadState(); }
+        else toast(r.error || '删除失败');
       };
     });
   }
@@ -881,15 +1092,12 @@ function renderCheckinForm() {
     <div class="section">
       <h3>✅ 今日打卡 <span class="sub">${STATE.date}</span></h3>
       <div class="field">
-        <label>完成时长（分钟）</label>
+        <label>完成时长（分钟，可选）</label>
         <input type="number" id="fDuration" placeholder="如 20" min="0" max="600">
       </div>
       <div class="field">
-        <label>${b.track_mode}（本次内容）</label>
-        <select id="fKp">
-          <option value="">未指定</option>
-          ${kps.map(k => `<option value="${k.id}">${esc(k.name)}</option>`).join('')}
-        </select>
+        <label>${b.track_mode}（本次内容，可选）</label>
+        ${kpSelectHtml(b, null)}
       </div>
       <div class="field">
         <label>备注（可选）</label>
@@ -897,10 +1105,39 @@ function renderCheckinForm() {
       </div>
       <button class="btn btn-primary" id="btnSaveCheckin" style="width:100%">确认打卡</button>
       <p style="font-size:12px;color:var(--text-soft);margin-top:9px;text-align:center">
-        打卡后可上传作业照片，系统会自动排队等待识别
+        打卡后如需上传作业照片识别错题，请在下方「作业」入口操作
       </p>
     </div>`;
   document.getElementById('btnSaveCheckin').onclick = saveCheckin;
+}
+
+/* 两级知识点下拉：父级（单元）→ optgroup，子级（课文）→ option */
+function kpSelectHtml(b, selectedKpName, selectId) {
+  const kps = STATE.data.knowledge_points[b.id] || [];
+  const id = selectId || 'fKp';
+  const parents = kps.filter(k => !k.parent_id);
+  const childrenOf = pid => kps.filter(k => k.parent_id === pid);
+  if (!parents.length) {
+    // 扁平板块
+    return `<select id="${id}">
+      <option value="">未指定</option>
+      ${kps.map(k => `<option value="${k.id}" ${selectedKpName && selectedKpName.includes(k.name) ? 'selected' : ''}>${esc(k.name)}</option>`).join('')}
+    </select>`;
+  }
+  // 两级板块
+  return `<select id="${id}">
+    <option value="">未指定</option>
+    ${parents.map(p => {
+      const kids = childrenOf(p.id);
+      if (!kids.length) return `<option value="${p.id}">${esc(p.name)}</option>`;
+      return `<optgroup label="${esc(p.name)}">
+        ${kids.map(k => {
+          const full = `${p.name}·${k.name}`;
+          return `<option value="${k.id}" ${selectedKpName && (selectedKpName === full || selectedKpName.includes(k.name)) ? 'selected' : ''}>${esc(k.name)}</option>`;
+        }).join('')}
+      </optgroup>`;
+    }).join('')}
+  </select>`;
 }
 
 async function saveCheckin() {
@@ -928,22 +1165,21 @@ async function renderDrawer() {
   const latestRun = (ci.runs || [])[0];
   const pendingQ = latestRun ? latestRun.questions.filter(q => q.status === 'pending' || q.status === 'rerun_requested') : [];
   const hasPendingReview = (ci.status === 'pending_review' || ci.status === 'rerun_requested') && pendingQ.length > 0;
+  const isHomework = ci.entry_type === 'homework';
 
   let html = '';
 
   /* 打卡信息 */
   html += `<div class="section">
-    <h3>✅ 今日打卡 <span class="sub">${ci.checkin_date} · ${esc(ci.member?.name || '')}</span></h3>
+    <h3>${isHomework ? '📚 作业详情' : '✅ 今日打卡'} <span class="sub">${ci.checkin_date} · ${esc(ci.member?.name || '')}</span></h3>
+    ${isHomework ? `<div class="hw-tag">作业可滞后补交 · 按知识点归档</div>` : ''}
     <div class="field">
       <label>完成时长（分钟）</label>
       <input type="number" id="dDuration" value="${ci.duration_min ?? ''}" min="0" max="600">
     </div>
     <div class="field">
       <label>${b.track_mode}</label>
-      <select id="dKp">
-        <option value="">未指定</option>
-        ${kps.map(k => `<option value="${k.id}" ${ci.note && ci.note.includes('[' + k.name + ']') ? 'selected' : ''}>${esc(k.name)}</option>`).join('')}
-      </select>
+      ${kpSelectHtml(b, ci.kp_name || ci.note, 'dKp')}
     </div>
     <div class="field">
       <label>备注</label>
@@ -1111,13 +1347,13 @@ function bindDrawerEvents() {
   const btnUpdate = document.getElementById('btnUpdateCI');
   if (btnUpdate) btnUpdate.onclick = async () => {
     const kpSel = document.getElementById('dKp');
-    const kpName = kpSel && kpSel.selectedOptions[0] && kpSel.value ? kpSel.selectedOptions[0].text : '';
+    const kpId = kpSel && kpSel.value ? parseInt(kpSel.value) : null;
     const note = document.getElementById('dNote').value;
     await fetch(`${API}/checkin/${ci.id}`, {
       method: 'PATCH', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         duration_min: document.getElementById('dDuration').value || null,
-        note: kpName ? `[${kpName}] ${note}` : note,
+        note, kp_id: kpId,
       }),
     });
     toast('已保存');
@@ -1293,6 +1529,22 @@ document.addEventListener('DOMContentLoaded', () => {
 
   document.getElementById('drawerClose').onclick = closeDrawer;
   document.getElementById('drawerMask').onclick = closeDrawer;
+
+  // 作业上传弹窗
+  const hwModalMask = document.getElementById('hwModalMask');
+  const hwModal = document.getElementById('hwModal');
+  if (hwModalMask && hwModal) {
+    document.getElementById('btnCloseHwModal').onclick = closeHomeworkModal;
+    document.getElementById('btnCancelHw').onclick = closeHomeworkModal;
+    hwModalMask.onclick = closeHomeworkModal;
+    document.getElementById('btnSubmitHw').onclick = submitHomework;
+    document.getElementById('btnHwPickPhoto').onclick = () => document.getElementById('hwPhotoInput').click();
+    document.getElementById('hwPhotoInput').onchange = e => {
+      for (const f of e.target.files) HW_PHOTOS.push(f);
+      renderHwPhotoPreview();
+      e.target.value = '';
+    };
+  }
 
   // 「同步最新版」按钮：家长触发云端从 GitHub 拉取最新代码并重启
   const syncBtn = document.getElementById('syncBtn');
