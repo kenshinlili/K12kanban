@@ -63,6 +63,43 @@
   <div class="drawer-body" id="drawerBody"></div>
 </div>
 
+<!-- 左右分屏错题审核弹窗 -->
+<div class="review-modal-mask" id="reviewModalMask"></div>
+<div class="review-modal" id="reviewModal">
+  <div class="review-modal-header">
+    <div class="review-modal-title">
+      <span id="reviewModalSubject">语文</span> · <span id="reviewModalBoard">校内精练</span>
+      <span class="review-modal-sub" id="reviewModalMeta">2026-09-04 · 2 张照片 · 3 题待审</span>
+    </div>
+    <div class="review-modal-actions">
+      <button class="btn btn-sm" id="btnPrintPreview" title="只显示题目，隐藏答案，方便打印">🖨 打印版预览</button>
+      <button class="btn btn-sm" id="btnCloseReviewModal">关闭</button>
+    </div>
+  </div>
+  <div class="review-modal-body">
+    <div class="review-modal-left" id="reviewModalLeft">
+      <!-- 左侧照片区 -->
+    </div>
+    <div class="review-modal-right" id="reviewModalRight">
+      <!-- 右侧错题编辑区 -->
+    </div>
+  </div>
+</div>
+
+<!-- 打印版预览弹窗 -->
+<div class="print-modal-mask" id="printModalMask"></div>
+<div class="print-modal" id="printModal">
+  <div class="print-modal-header">
+    <h3>🖨 打印版预览（仅题目，隐藏答案）</h3>
+    <button class="icon-btn" id="btnClosePrintModal">✕</button>
+  </div>
+  <div class="print-modal-body" id="printModalBody"></div>
+  <div class="print-modal-footer">
+    <button class="btn btn-primary" id="btnDoPrint">打印 / 另存为 PDF</button>
+    <button class="btn" id="btnClosePrintModal2">关闭</button>
+  </div>
+</div>
+
 <!-- 提示 -->
 <div class="toast" id="toast"></div>
 

@@ -995,7 +995,9 @@ async function renderDrawer() {
   /* 错题审核 */
   if (latestRun && latestRun.questions.length) {
     html += `<div class="section">
-      <h3>❌ 识别出的错题 <span class="sub">共 ${latestRun.questions.length} 题 · 待审 ${pendingQ.length}</span></h3>
+      <h3>❌ 识别出的错题 <span class="sub">共 ${latestRun.questions.length} 题 · 待审 ${pendingQ.length}</span>
+        <button class="btn btn-primary btn-sm" id="btnOpenReviewModal">↔ 分屏审核</button>
+      </h3>
       ${latestRun.questions.map(q => wrongQuestionCard(q)).join('')}
     </div>`;
   } else if (ci.status === 'confirmed') {
@@ -1100,6 +1102,9 @@ function actionText(a) {
 function bindDrawerEvents() {
   const ci = CURRENT_CHECKIN;
   const body = document.getElementById('drawerBody');
+
+  const btnOpenReview = document.getElementById('btnOpenReviewModal');
+  if (btnOpenReview) btnOpenReview.onclick = () => openReviewModal(ci);
 
   const btnUpdate = document.getElementById('btnUpdateCI');
   if (btnUpdate) btnUpdate.onclick = async () => {
@@ -1286,18 +1291,21 @@ document.addEventListener('DOMContentLoaded', () => {
   const syncBtn = document.getElementById('syncBtn');
   if (syncBtn) {
     syncBtn.onclick = async () => {
-      // 先拉一次最新状态，避免在 GitHub 已落后的情况下误点 sync 导致回退
+      // 先拉一次最新状态，用于显示提示，但不阻止同步（后端会直接拉 GitHub）
       const s = await get('/status').catch(() => ({ ok: false }));
       if (s && s.ok) {
         STATE.status = s;
         renderStatus();
         if (s.status === 'synced') {
-          alert('当前云端版本已和 GitHub 对齐，无需同步。');
+          toast('✓ 当前云端版本已和 GitHub 对齐，无需同步');
           return;
         }
-        if (!s.can_sync && s.warning) {
-          alert('同步被阻止：' + s.warning);
+        if (!s.can_sync) {
+          toast('⚠ 同步被阻止：' + (s.warning || '无法同步'));
           return;
+        }
+        if (s.status === 'unknown') {
+          toast('⟳ GitHub 状态暂时获取不到，将直接尝试拉取…');
         }
       }
       if (!confirm('确认从 GitHub 拉取最新代码并重启看板？\n（重启期间约 10–30 秒不可用，刷新即可）')) return;
@@ -1306,14 +1314,15 @@ document.addEventListener('DOMContentLoaded', () => {
       try {
         const r = await post('/sync', { member: STATE.member });
         if (r && r.ok) {
+          toast('已触发同步，后台拉取最新代码并重启…');
           pollVersion(r.old_version || null);
         } else {
-          alert('同步失败：' + ((r && r.error) || '未知错误'));
+          toast('同步失败：' + ((r && r.error) || '未知错误'));
           syncBtn.disabled = false;
           syncBtn.textContent = '⟳ 同步最新版';
         }
       } catch (e) {
-        alert('同步请求异常：' + e);
+        toast('同步请求异常：' + e);
         syncBtn.disabled = false;
         syncBtn.textContent = '⟳ 同步最新版';
       }
@@ -1411,4 +1420,219 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   loadState();
+});
+
+/* ---------- 左右分屏错题审核弹窗 ---------- */
+let REVIEW_MODAL_DATA = null; // { checkin, questions }
+
+function openReviewModal(ci) {
+  REVIEW_MODAL_DATA = { checkin: ci, questions: JSON.parse(JSON.stringify((ci.runs || [])[0]?.questions || [])) };
+  renderReviewModal();
+  document.getElementById('reviewModalMask').classList.add('show');
+  document.getElementById('reviewModal').classList.add('show');
+}
+
+function closeReviewModal() {
+  document.getElementById('reviewModalMask').classList.remove('show');
+  document.getElementById('reviewModal').classList.remove('show');
+  REVIEW_MODAL_DATA = null;
+}
+
+function renderReviewModal() {
+  const { checkin, questions } = REVIEW_MODAL_DATA;
+  const board = CURRENT_BOARD;
+  const pending = questions.filter(q => q.status === 'pending').length;
+
+  document.getElementById('reviewModalSubject').textContent = board?.subject || '科目';
+  document.getElementById('reviewModalBoard').textContent = board?.name || '板块';
+  document.getElementById('reviewModalMeta').textContent =
+    `${checkin.checkin_date} · ${checkin.photos.length} 张照片 · ${questions.length} 题 · 待审 ${pending} 题`;
+
+  // 左侧照片区
+  const left = document.getElementById('reviewModalLeft');
+  left.innerHTML = checkin.photos.length
+    ? checkin.photos.map((p, i) => `
+        <div class="photo-page">
+          <img src="/uploads/${p.filename}" alt="作业照片 ${i + 1}">
+          <div class="photo-page-num">照片 ${i + 1} / ${checkin.photos.length}</div>
+        </div>`).join('')
+    : '<p style="color:var(--text-soft);text-align:center">没有照片</p>';
+
+  // 右侧错题编辑区
+  const right = document.getElementById('reviewModalRight');
+  if (!questions.length) {
+    right.innerHTML = '<p style="color:var(--text-soft)">没有识别出错题</p>';
+    return;
+  }
+
+  let html = `<div class="rqe-print-hint">
+    💡 <b>使用提示</b>：左侧看原图，右侧改识别结果。「题目原文」保存印刷体（可打印给孩子重做），「学生当时写的答案」和「正确答案」分开填写。
+  </div>`;
+
+  questions.forEach((q, idx) => {
+    const stateCls = q.status === 'confirmed' ? 'confirmed' : q.status === 'rejected' ? 'rejected' : '';
+    const stateText = q.status === 'confirmed' ? '✓ 已确认' : q.status === 'rejected' ? '✗ 已驳回' : '待审';
+    html += `<div class="review-question-edit ${stateCls}" data-qidx="${idx}">
+      <div class="rqe-header">
+        <div><span class="rqe-num">${idx + 1}</span> <span class="rqe-status">${stateText}</span></div>
+        <button class="btn btn-sm" data-ract="printSingle" data-qidx="${idx}">🖨 单题打印</button>
+      </div>
+      <div class="rqe-field">
+        <label>题目原文（印刷体，打印复习时只显示这部分）<span class="tip">可编辑</span></label>
+        <textarea id="rqe-content-${idx}">${esc(q.content)}</textarea>
+      </div>
+      <div class="rqe-row">
+        <div class="rqe-field">
+          <label>学生当时写的答案 <span class="tip">可编辑</span></label>
+          <textarea id="rqe-stu-${idx}">${esc(q.student_answer || '')}</textarea>
+        </div>
+        <div class="rqe-field">
+          <label>正确答案 <span class="tip">可编辑</span></label>
+          <textarea id="rqe-ans-${idx}">${esc(q.correct_answer || '')}</textarea>
+        </div>
+      </div>
+      <div class="rqe-row">
+        <div class="rqe-field">
+          <label>错误类型</label>
+          <input type="text" id="rqe-type-${idx}" value="${esc(q.error_type || '')}">
+        </div>
+        <div class="rqe-field">
+          <label>知识点</label>
+          <input type="text" id="rqe-kp-${idx}" value="${esc(q.knowledge_point || '')}">
+        </div>
+      </div>
+      <div class="rqe-actions">
+        <button class="btn btn-primary" data-ract="save" data-qidx="${idx}">💾 保存修改</button>
+        <button class="btn btn-success" data-ract="confirm" data-qidx="${idx}">✓ 确认错题</button>
+        <button class="btn btn-danger" data-ract="reject" data-qidx="${idx}">✗ 识别有误</button>
+        <button class="btn btn-sm" data-ract="blank" data-qidx="${idx}">⬜ 一键整理为印刷体（把答案处变空白）</button>
+      </div>
+      ${q.review_comment ? `<div class="wq-comment">💬 ${esc(q.review_comment)}</div>` : ''}
+    </div>`;
+  });
+
+  right.innerHTML = html;
+
+  // 绑定事件
+  right.querySelectorAll('[data-ract]').forEach(btn => {
+    btn.onclick = () => handleReviewModalAction(btn.dataset.ract, parseInt(btn.dataset.qidx));
+  });
+
+  // 顶部按钮
+  document.getElementById('btnPrintPreview').onclick = () => openPrintModal(questions);
+  document.getElementById('btnCloseReviewModal').onclick = closeReviewModal;
+  document.getElementById('reviewModalMask').onclick = closeReviewModal;
+}
+
+function getQuestionFormData(idx) {
+  return {
+    content: document.getElementById(`rqe-content-${idx}`).value.trim(),
+    student_answer: document.getElementById(`rqe-stu-${idx}`).value.trim(),
+    correct_answer: document.getElementById(`rqe-ans-${idx}`).value.trim(),
+    error_type: document.getElementById(`rqe-type-${idx}`).value.trim(),
+    knowledge_point: document.getElementById(`rqe-kp-${idx}`).value.trim(),
+  };
+}
+
+async function handleReviewModalAction(act, idx) {
+  const { checkin, questions } = REVIEW_MODAL_DATA;
+  const q = questions[idx];
+
+  if (act === 'save') {
+    const payload = getQuestionFormData(idx);
+    const r = await post(`/question/${q.id}/update`, { ...payload, member_id: STATE.member });
+    if (!r.ok) { toast('保存失败：' + (r.error || '未知')); return; }
+    Object.assign(q, payload);
+    toast('✓ 已保存');
+    // 同步刷新抽屉列表
+    await loadState();
+    await loadCheckin(checkin.id);
+    renderDrawer();
+    return;
+  }
+
+  if (act === 'confirm') {
+    await post(`/question/${q.id}/update`, { ...getQuestionFormData(idx), member_id: STATE.member });
+    const r = await post(`/question/${q.id}/review`, { action: 'confirm', member_id: STATE.member });
+    if (!r.ok) { toast('确认失败：' + (r.error || '未知')); return; }
+    q.status = 'confirmed';
+    toast('✓ 已确认');
+    await loadState();
+    await loadCheckin(checkin.id);
+    renderReviewModal();
+    renderDrawer();
+    return;
+  }
+
+  if (act === 'reject') {
+    const comment = prompt('请说明哪里识别错了（会打回给 AI 重跑）：');
+    if (comment === null) return;
+    await post(`/question/${q.id}/update`, { ...getQuestionFormData(idx), member_id: STATE.member });
+    const r = await post(`/question/${q.id}/review`, { action: 'reject', comment, member_id: STATE.member });
+    if (!r.ok) { toast('驳回失败：' + (r.error || '未知')); return; }
+    q.status = 'rejected';
+    q.review_comment = comment;
+    toast('✗ 已驳回');
+    await loadState();
+    await loadCheckin(checkin.id);
+    renderReviewModal();
+    renderDrawer();
+    return;
+  }
+
+  if (act === 'blank') {
+    // 一键整理为印刷体：把正确答案/学生答案从题目中移除，替换为下划线空白
+    const contentEl = document.getElementById(`rqe-content-${idx}`);
+    const ans = document.getElementById(`rqe-ans-${idx}`).value.trim();
+    const stu = document.getElementById(`rqe-stu-${idx}`).value.trim();
+    let content = contentEl.value;
+    if (ans) content = content.split(ans).join('________');
+    if (stu && stu !== ans) content = content.split(stu).join('________');
+    // 兜底：把常见手写答案格式（括号内内容）也清空
+    content = content.replace(/（[^）]{1,20}）/g, '（________）');
+    content = content.replace(/\([^)]{1,20}\)/g, '(________)');
+    contentEl.value = content;
+    toast('已把答案处替换为空白，请再检查题目是否通顺');
+    return;
+  }
+
+  if (act === 'printSingle') {
+    openPrintModal([q]);
+  }
+}
+
+/* ---------- 打印版预览 ---------- */
+function openPrintModal(qList) {
+  const { checkin } = REVIEW_MODAL_DATA || { checkin: { checkin_date: '' } };
+  const board = CURRENT_BOARD;
+  const title = `${board?.subject || ''} · ${board?.name || '错题'} 打印版`;
+  let html = `<div class="print-sheet-title">${esc(title)}</div>
+    <div class="print-sheet-sub">${esc(checkin.checkin_date || '')} · 共 ${qList.length} 题 · 请作答后对照答案批改</div>`;
+  qList.forEach((q, i) => {
+    html += `<div class="print-question">
+      <div class="print-question-num">${i + 1}.</div>
+      <div class="print-question-content">${esc(q.content)}</div>
+      <div class="print-question-answer-line"></div>
+    </div>`;
+  });
+  html += `<div style="margin-top:30px;font-size:12px;color:#999;text-align:center">— 答案见家长端「错题本」—</div>`;
+  document.getElementById('printModalBody').innerHTML = html;
+  document.getElementById('printModalMask').classList.add('show');
+  document.getElementById('printModal').classList.add('show');
+}
+
+function closePrintModal() {
+  document.getElementById('printModalMask').classList.remove('show');
+  document.getElementById('printModal').classList.remove('show');
+}
+
+// 打印按钮用 window.print 触发浏览器的打印对话框（CSS @media print 控制只打印弹窗内容）
+document.addEventListener('DOMContentLoaded', () => {
+  const btnPrint = document.getElementById('btnDoPrint');
+  if (btnPrint) btnPrint.onclick = () => window.print();
+  const close1 = document.getElementById('btnClosePrintModal');
+  const close2 = document.getElementById('btnClosePrintModal2');
+  if (close1) close1.onclick = closePrintModal;
+  if (close2) close2.onclick = closePrintModal;
+  document.getElementById('printModalMask').onclick = closePrintModal;
 });

@@ -500,6 +500,128 @@ body {
 .review-history .hh-w { color: var(--danger); text-decoration: line-through; }
 .review-tip { background: var(--primary-soft); border-radius: 9px; padding: 9px 12px; font-size: 12.5px; color: var(--primary); margin-top: 9px; }
 
+/* ---------- 左右分屏错题审核弹窗 ---------- */
+.review-modal-mask {
+  position: fixed; inset: 0; background: rgba(15, 23, 42, .55);
+  opacity: 0; pointer-events: none; transition: opacity .2s; z-index: 110;
+}
+.review-modal-mask.show { opacity: 1; pointer-events: auto; }
+.review-modal {
+  position: fixed; top: 3vh; left: 3vw; right: 3vw; bottom: 3vh;
+  background: var(--card); border-radius: 16px; box-shadow: var(--shadow-lg);
+  display: flex; flex-direction: column; z-index: 111;
+  opacity: 0; transform: scale(.96); pointer-events: none; transition: all .2s;
+}
+.review-modal.show { opacity: 1; transform: scale(1); pointer-events: auto; }
+.review-modal-header {
+  padding: 14px 18px; border-bottom: 1px solid var(--border);
+  display: flex; justify-content: space-between; align-items: center; gap: 12px;
+}
+.review-modal-title { display: flex; flex-direction: column; gap: 2px; }
+.review-modal-title > span:first-child { font-size: 16px; font-weight: 700; }
+.review-modal-sub { font-size: 12px; color: var(--text-soft); font-weight: 400; }
+.review-modal-actions { display: flex; gap: 8px; }
+.review-modal-body {
+  flex: 1; display: flex; overflow: hidden; min-height: 0;
+}
+.review-modal-left {
+  width: 45%; min-width: 320px; border-right: 1px solid var(--border);
+  overflow-y: auto; padding: 16px; background: #f8f9fb;
+}
+.review-modal-left .photo-page {
+  background: #fff; border: 1px solid var(--border); border-radius: 10px;
+  padding: 10px; margin-bottom: 14px; box-shadow: var(--shadow);
+}
+.review-modal-left .photo-page img {
+  width: 100%; height: auto; display: block; border-radius: 6px;
+}
+.review-modal-left .photo-page-num {
+  text-align: center; font-size: 12px; color: var(--text-soft); margin-top: 7px;
+}
+.review-modal-right {
+  flex: 1; overflow-y: auto; padding: 16px 18px 30px;
+}
+.review-question-edit {
+  background: #fff; border: 1px solid var(--border); border-radius: 12px;
+  padding: 14px; margin-bottom: 14px; box-shadow: var(--shadow);
+}
+.review-question-edit.confirmed { border-color: #bbf7d0; background: var(--success-soft); }
+.review-question-edit.rejected { border-color: #fecaca; background: var(--danger-soft); opacity: .8; }
+.rqe-header {
+  display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 10px;
+}
+.rqe-num {
+  background: var(--primary); color: #fff; font-size: 12px; font-weight: 700;
+  width: 24px; height: 24px; border-radius: 50%; display: inline-flex;
+  align-items: center; justify-content: center;
+}
+.rqe-status { font-size: 12px; }
+.rqe-field { margin-bottom: 10px; }
+.rqe-field label { display: block; font-size: 12px; color: var(--text-soft); margin-bottom: 4px; }
+.rqe-field label .tip { font-weight: 400; color: #9ca3af; margin-left: 4px; }
+.rqe-field textarea,
+.rqe-field input[type=text] {
+  width: 100%; border: 1px solid var(--border); border-radius: 8px;
+  padding: 8px 11px; font-size: 13.5px; font-family: inherit;
+}
+.rqe-field textarea { min-height: 58px; resize: vertical; }
+.rqe-field input[type=text] { height: 36px; }
+.rqe-field textarea:focus, .rqe-field input:focus { outline: none; border-color: var(--primary); }
+.rqe-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.rqe-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--border); }
+.rqe-actions .btn { font-size: 12.5px; padding: 6px 12px; }
+.rqe-actions .btn-primary { background: var(--success); border-color: var(--success); }
+.rqe-actions .btn-primary:hover { opacity: .9; }
+.rqe-actions .btn-danger { color: var(--danger); border-color: #fecaca; }
+.rqe-print-hint {
+  background: var(--primary-soft); color: var(--primary); border-radius: 8px;
+  padding: 9px 12px; font-size: 12px; margin-bottom: 12px; line-height: 1.6;
+}
+
+/* 打印版预览弹窗 */
+.print-modal-mask {
+  position: fixed; inset: 0; background: rgba(15, 23, 42, .55);
+  opacity: 0; pointer-events: none; transition: opacity .2s; z-index: 120;
+}
+.print-modal-mask.show { opacity: 1; pointer-events: auto; }
+.print-modal {
+  position: fixed; top: 6vh; left: 50%; transform: translateX(-50%) translateY(16px);
+  width: min(720px, 94vw); max-height: 84vh; background: #fff;
+  border-radius: 14px; box-shadow: var(--shadow-lg); z-index: 121;
+  display: flex; flex-direction: column; opacity: 0; pointer-events: none; transition: all .2s;
+}
+.print-modal.show { opacity: 1; transform: translateX(-50%) translateY(0); pointer-events: auto; }
+.print-modal-header {
+  padding: 14px 18px; border-bottom: 1px solid var(--border);
+  display: flex; justify-content: space-between; align-items: center;
+}
+.print-modal-header h3 { font-size: 15px; }
+.print-modal-body {
+  flex: 1; overflow-y: auto; padding: 20px 26px;
+  font-size: 15px; line-height: 1.8;
+}
+.print-modal-footer {
+  padding: 12px 18px; border-top: 1px solid var(--border);
+  display: flex; justify-content: flex-end; gap: 10px;
+}
+.print-sheet-title { font-size: 18px; font-weight: 700; text-align: center; margin-bottom: 18px; }
+.print-sheet-sub { text-align: center; font-size: 12px; color: var(--text-soft); margin-bottom: 24px; }
+.print-question { margin-bottom: 22px; }
+.print-question-num { font-weight: 700; margin-bottom: 6px; }
+.print-question-content { margin-bottom: 8px; }
+.print-question-answer-line { border-bottom: 1px solid #111; height: 32px; margin-top: 8px; }
+
+@media print {
+  body * { visibility: hidden; }
+  .print-modal, .print-modal * { visibility: visible; }
+  .print-modal {
+    position: absolute; top: 0; left: 0; transform: none;
+    width: 100%; max-height: none; box-shadow: none;
+  }
+  .print-modal-header, .print-modal-footer { display: none; }
+  .print-modal-body { padding: 20px; }
+}
+
 /* 响应式 */
 @media (max-width: 640px) {
   .topbar { padding: 10px 13px; }
@@ -509,6 +631,11 @@ body {
   .board-grid { grid-template-columns: 1fr; }
   .drawer { width: 100%; }
   .topbar-left { width: 100%; justify-content: space-between; }
+  .review-modal { top: 0; left: 0; right: 0; bottom: 0; border-radius: 0; }
+  .review-modal-body { flex-direction: column; }
+  .review-modal-left { width: 100%; min-width: auto; max-height: 38vh; border-right: none; border-bottom: 1px solid var(--border); }
+  .review-modal-right { max-height: 62vh; }
+  .rqe-row { grid-template-columns: 1fr; }
 }
 
 /* ---------- 错题本：归类 / 分布 / 拼音 ---------- */

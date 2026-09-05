@@ -422,18 +422,23 @@ def api_status():
     cloud_short = cloud_commit[:12] if cloud_commit != 'unknown' else 'unknown'
     gh_short = gh_commit[:12] if gh_commit != 'unknown' else 'unknown'
 
-    if cloud_commit == 'unknown' or gh_commit == 'unknown':
+    if cloud_commit == 'unknown':
         status = 'unknown'
         can_sync = False
-        warning = '无法获取版本信息'
+        warning = '无法获取云端版本信息'
+    elif gh_commit == 'unknown':
+        # GitHub API 可能因网络/TLS 不可达，但不阻止用户触发 sync（后端会实际拉取代码）
+        status = 'unknown'
+        can_sync = True
+        warning = 'GitHub 状态暂时获取不到，点击同步后由后端直接尝试拉取'
     elif cloud_short == gh_short:
         status = 'synced'
         can_sync = False
-        warning = ''
+        warning = '当前云端版本已和 GitHub 对齐，无需同步'
     else:
         status = 'diverged'
         can_sync = True
-        warning = ''
+        warning = f'GitHub({gh_short}) 领先云端({cloud_short})，建议同步'
 
     return jsonify({
         'ok': True,
@@ -822,6 +827,36 @@ def api_ai_result(cid):
 
 
 # ---------------- 审核 / 重跑 / 流转 ----------------
+
+@app.route('/api/question/<int:qid>/update', methods=['POST'])
+def api_update_question(qid):
+    """家长人工修正错题字段（题目/错答/正解/错误类型/知识点）。
+
+    支持在审核前或审核后修正，修正后保持原审核状态不变（已确认仍保持确认）。
+    """
+    data = request.get_json() or {}
+    member = data.get('member_id') or 'dad'
+    allowed = {'content', 'student_answer', 'correct_answer', 'error_type', 'knowledge_point'}
+    updates = {k: (data.get(k) or '').strip() for k in allowed if data.get(k) is not None}
+    if not updates:
+        return jsonify({'ok': False, 'error': '没有提供要更新的字段'}), 400
+
+    conn = db.get_conn()
+    try:
+        q = conn.execute('SELECT * FROM wrong_questions WHERE id=?', (qid,)).fetchone()
+        if not q:
+            return jsonify({'ok': False, 'error': 'not found'}), 404
+        fields = ', '.join(f'{k}=?' for k in updates)
+        values = list(updates.values()) + [qid]
+        conn.execute(f'UPDATE wrong_questions SET {fields} WHERE id=?', values)
+        log_action(conn, q['checkin_id'], q['run_id'], member,
+                   'question_edit',
+                   '修正：' + ', '.join(updates.keys()))
+        conn.commit()
+        return jsonify({'ok': True, 'updated': list(updates.keys())})
+    finally:
+        conn.close()
+
 
 @app.route('/api/question/<int:qid>/review', methods=['POST'])
 def api_review_question(qid):
