@@ -34,6 +34,11 @@ import persist
 _PERSIST_MSG = persist.ensure_data(INSTANCE_DIR)
 
 import db
+import storage
+
+# 照片存储抽象层：当前 LocalDisk（/uploads/），未来可切 COS/OSS 而不用改业务代码
+STORAGE = storage.build_storage(UPLOAD_DIR)
+STORAGE.ensure()
 
 try:
     from pypinyin import lazy_pinyin, Style
@@ -94,6 +99,17 @@ def row2dict(r):
                     d[json_key] = []
             elif not v:
                 d[json_key] = []
+    return d
+
+
+def photo_dict(p):
+    """photos 行转 dict，并补上 `url` 字段（由 STORAGE 生成）。
+
+    前端一律用这个 url 渲染 <img>，不要自己拼 '/uploads/xxx' ——
+    这样未来切到 COS/OSS 时前端零改动。
+    """
+    d = row2dict(p)
+    d['url'] = STORAGE.url_for(d['filename'])
     return d
 
 
@@ -356,9 +372,9 @@ def api_backup():
             db_path = os.path.join(DATA_DIR, 'kanban.db')
             if os.path.exists(db_path):
                 zf.write(db_path, 'data/kanban.db')
-            for fname in os.listdir(UPLOAD_DIR):
-                fpath = os.path.join(UPLOAD_DIR, fname)
-                if os.path.isfile(fpath):
+            for fname in STORAGE.list_keys():
+                fpath = STORAGE.abspath(fname)
+                if fpath and os.path.isfile(fpath):
                     zf.write(fpath, os.path.join('uploads', fname))
     finally:
         tmp.close()
@@ -408,7 +424,7 @@ def api_restore():
             if os.path.isdir(INSTANCE_DIR):
                 shutil.move(INSTANCE_DIR, bak_dir)
             os.makedirs(DATA_DIR, exist_ok=True)
-            os.makedirs(UPLOAD_DIR, exist_ok=True)
+            STORAGE.ensure()
 
             # 解压到 instance/
             zf.extractall(INSTANCE_DIR)
@@ -897,12 +913,7 @@ def api_checkin_delete(cid):
         photos = conn.execute(
             'SELECT filename FROM photos WHERE checkin_id=?', (cid,)).fetchall()
         for p in photos:
-            path = os.path.join(UPLOAD_DIR, p['filename'])
-            if os.path.exists(path):
-                try:
-                    os.remove(path)
-                except OSError:
-                    pass
+            STORAGE.delete(p['filename'])
         conn.execute('DELETE FROM photos WHERE checkin_id=?', (cid,))
         conn.execute('DELETE FROM wrong_questions WHERE checkin_id=?', (cid,))
         conn.execute('DELETE FROM ai_runs WHERE checkin_id=?', (cid,))
@@ -966,7 +977,7 @@ def api_upload_photos(cid):
                 continue
             ext = f.filename.rsplit('.', 1)[1].lower()
             fname = f'{uuid.uuid4().hex}.{ext}'
-            f.save(os.path.join(UPLOAD_DIR, fname))
+            STORAGE.save(f, fname)
             conn.execute(
                 'INSERT INTO photos (checkin_id, filename, original_name, uploaded_at) '
                 'VALUES (?,?,?,?)', (cid, fname, f.filename, db.now_str()))
@@ -1007,12 +1018,7 @@ def api_photo_delete(pid):
         p = conn.execute('SELECT * FROM photos WHERE id=?', (pid,)).fetchone()
         if not p:
             return jsonify({'ok': False, 'error': 'not found'}), 404
-        path = os.path.join(UPLOAD_DIR, p['filename'])
-        if os.path.exists(path):
-            try:
-                os.remove(path)
-            except OSError:
-                pass
+        STORAGE.delete(p['filename'])
         conn.execute('DELETE FROM photos WHERE id=?', (pid,))
         conn.commit()
         return jsonify({'ok': True})
@@ -1033,7 +1039,7 @@ def api_checkin_detail(cid):
         data['member'] = row2dict(conn.execute(
             'SELECT * FROM members WHERE id=?', (ci['member_id'],)).fetchone() or
             {'id': ci['member_id'], 'name': ci['member_id']})
-        data['photos'] = [row2dict(r) for r in conn.execute(
+        data['photos'] = [photo_dict(r) for r in conn.execute(
             'SELECT * FROM photos WHERE checkin_id=? ORDER BY id', (cid,)).fetchall()]
         runs = [row2dict(r) for r in conn.execute(
             'SELECT * FROM ai_runs WHERE checkin_id=? ORDER BY version DESC',
@@ -1080,10 +1086,8 @@ def api_pending_ai():
         out = []
         for r in rows:
             item = row2dict(r)
-            item['photos'] = [row2dict(p) for p in conn.execute(
+            item['photos'] = [photo_dict(p) for p in conn.execute(
                 'SELECT * FROM photos WHERE checkin_id=?', (r['id'],)).fetchall()]
-            for p in item['photos']:
-                p['url'] = f"/uploads/{p['filename']}"
             last_run = conn.execute(
                 'SELECT * FROM ai_runs WHERE checkin_id=? ORDER BY version DESC LIMIT 1',
                 (r['id'],)).fetchone()

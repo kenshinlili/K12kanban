@@ -1198,7 +1198,7 @@ async function renderDrawer() {
     <h3>📷 作业照片 <span class="sub">${ci.photos.length} 张</span></h3>
     <div class="photo-grid">
       ${ci.photos.map(p => `<div class="photo-item">
-        <img src="/uploads/${p.filename}" onclick="window.open('/uploads/${p.filename}','_blank')">
+        <img src="${p.url || '/uploads/' + p.filename}" onclick="window.open('${p.url || '/uploads/' + p.filename}','_blank')">
         <button class="photo-del" data-photodel="${p.id}">×</button>
       </div>`).join('')}
       <div class="photo-add" id="photoAdd">
@@ -1787,7 +1787,7 @@ function renderReviewModal() {
   left.innerHTML = checkin.photos.length
     ? checkin.photos.map((p, i) => `
         <div class="photo-page">
-          <img src="/uploads/${p.filename}" alt="作业照片 ${i + 1}">
+          <img src="${p.url || '/uploads/' + p.filename}" alt="作业照片 ${i + 1}">
           <div class="photo-page-num">照片 ${i + 1} / ${checkin.photos.length}</div>
         </div>`).join('')
     : '<p style="color:var(--text-soft);text-align:center">没有照片</p>';
