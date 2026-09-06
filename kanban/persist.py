@@ -152,15 +152,50 @@ def restore(instance_dir, src=None):
         return False, str(e)
 
 
+def _user_data_count(instance_dir):
+    """统计用户数据条数（照片 + 打卡记录）。
+
+    用于区分「真有数据」和「deploy 后 init_db 建出来的空库」。
+    读不了时返回 -1（当作有数据，绝不冒险恢复）。
+    """
+    p = db_path(instance_dir)
+    n = 0
+    found = False
+    try:
+        import sqlite3
+        con = sqlite3.connect(p)
+        for t in ('photos', 'checkins'):
+            try:
+                n += int(con.execute(f'SELECT COUNT(*) FROM {t}').fetchone()[0])
+                found = True
+            except Exception:
+                continue
+        con.close()
+    except Exception:
+        return -1
+    return n if found else -1
+
+
 def ensure_data(instance_dir):
-    """启动时调用：数据没了就自动从快照恢复（数据自愈）。"""
+    """启动时调用：数据没了就自动从快照恢复（数据自愈）。
+
+    判定「没数据」有两种情况：
+      1. kanban.db 文件不存在（deploy 整目录清空）
+      2. 库存在但照片/打卡都为 0（deploy 前被 init_db 建了空库）
+    只要快照存在就恢复，绝不覆盖已有真实数据。
+    """
     try:
         os.makedirs(os.path.join(instance_dir, 'data'), exist_ok=True)
         os.makedirs(os.path.join(instance_dir, 'uploads'), exist_ok=True)
     except Exception:
         pass
     if has_data(instance_dir):
-        return False, '数据存在，无需恢复'
+        cnt = _user_data_count(instance_dir)
+        if cnt != 0:
+            return False, '数据存在，无需恢复'
+        if not (SNAPSHOT and os.path.isfile(SNAPSHOT)):
+            return False, '空库且无快照，按首次启动处理'
+        LOG.warning('[persist] 检测到空库（照片/打卡均为 0），尝试从快照恢复')
     ok, msg = restore(instance_dir)
     if ok:
         LOG.warning('[persist] 检测到 instance/ 为空，已自动从快照恢复：%s', SNAPSHOT)
