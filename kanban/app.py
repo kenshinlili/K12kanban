@@ -474,15 +474,12 @@ _GH_CIRCUIT_COOLDOWN = 600   # 熔断时长（秒）——10 分钟后自动重�
 # 这里用公益镜像做「前缀代理」竞速。所有镜像都是 URL 前缀代理形式：
 #   https://<镜像>/<原始 GitHub URL>
 # 竞速成功的镜像会缓存到 version.json 的 mirror_used 字段，下次 sync 优先复用。
+# 镜像列表：保留 None 直连（万一用户改在能通 GitHub 的环境部署）。
+# 已知 WorkBuddy 云端沙箱 → GitHub 全部不通（实测 7 镜像×8s 全失败），
+# 故 timeout 砍到 1.5s，让熔断器秒触发；并把 api/status 的总上限拉到 ~3s。
 # ---------------------------------------------------------------------------
 GITHUB_MIRRORS = [
-    None,                          # 直连原站（优先，最快）
-    'https://ghproxy.com',
-    'https://ghproxy.net',
-    'https://github.akams.cn',
-    'https://gh.llkk.cc',
-    'https://hub.gitmirror.com',
-    'https://ghproxy.homeboyc.cn',
+    None,                          # 直连原站（仅在非沙箱环境有用）
 ]
 
 # 运行时记住上次成功的镜像（不落盘，进程重启后重新竞速）
@@ -584,7 +581,8 @@ def fetch_github_head(repo='kenshinlili/K12kanban', branch='master', force=False
         return _GITHUB_STATUS_CACHE[1]
 
     raw_url = f'https://api.github.com/repos/{repo}/commits/{branch}'
-    data_bytes, used = fetch_via_mirrors(raw_url, kind='api', timeout=8, max_bytes=2 * 1024 * 1024)
+    # timeout 砍到 1.5s（沙箱到 GitHub 全部不通时让熔断秒触发，不要再 17-20s 慢扫描）
+    data_bytes, used = fetch_via_mirrors(raw_url, kind='api', timeout=1.5, max_bytes=2 * 1024 * 1024)
     if data_bytes is None:
         # 失败：累计熔断计数
         _GH_CIRCUIT['fails'] += 1

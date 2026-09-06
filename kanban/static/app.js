@@ -51,14 +51,14 @@ function todayStr() {
 
 /* ---------- 数据 ---------- */
 async function loadState() {
-  const [d, v, s] = await Promise.all([
+  // 注意：/api/status（GitHub 对齐查询）**不再**默认跑。沙箱到 GitHub 不通，每次 deploy
+  // 后首次访问仍要 1.5s（治标已缩短）+ 仍占首屏带宽。只在用户主动点「同步」按钮时才查。
+  const [d, v] = await Promise.all([
     get(`/state?date=${STATE.date}&member=${STATE.member}`),
     get('/version').catch(() => ({ ok: false })),
-    get('/status').catch(() => ({ ok: false }))
   ]);
   if (d.ok) STATE.data = d;
   if (v.ok && v.version) STATE.version = v.version;
-  if (s.ok && s.status) STATE.status = s;
   render();
 }
 async function loadCheckin(cid) {
@@ -479,12 +479,22 @@ async function renderTodo() {
   container.querySelectorAll('[data-todo]').forEach(btn => {
     btn.onclick = async () => {
       const cid = btn.dataset.cid;
-      if (btn.dataset.todo === 'take') {
-        await post(`/checkin/${cid}/take-back`, { member_id: STATE.member });
-        toast('已接手');
+      // 防双击：禁用按钮 + 改文字，直到 openCheckin 给出结果
+      if (btn.disabled) return;
+      btn.disabled = true;
+      const orig = btn.textContent;
+      btn.textContent = '加载中…';
+      try {
+        if (btn.dataset.todo === 'take') {
+          await post(`/checkin/${cid}/take-back`, { member_id: STATE.member });
+          toast('已接手');
+        }
+        await loadState();
+        await openCheckin(cid);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = orig;
       }
-      await loadState();
-      await openCheckin(cid);
     };
   });
 }
@@ -492,6 +502,56 @@ async function renderTodo() {
 
 // 复习板块当前渲染的题目列表缓存（供"🖨 打印这题"按 schedule id 反查完整题目对象）
 let REVIEW_ITEMS_CACHE = [];
+
+/* ---------- 打印队列（全局，localStorage 持久化） ---------- */
+// 每项结构：{ key, subject, board_name, kp_name, content, correct_answer, student_answer, error_type }
+// 同一道题（用 key 去重）加第二次会自动从队列移除（toggle 行为）。
+const PRINT_QUEUE_KEY = 'kb_print_queue_v1';
+let PRINT_QUEUE = [];
+function loadPrintQueue() {
+  try {
+    const raw = localStorage.getItem(PRINT_QUEUE_KEY);
+    PRINT_QUEUE = raw ? JSON.parse(raw) : [];
+  } catch (e) { PRINT_QUEUE = []; }
+}
+function savePrintQueue() {
+  try { localStorage.setItem(PRINT_QUEUE_KEY, JSON.stringify(PRINT_QUEUE)); } catch (e) {}
+}
+function printQueueKeyOf(item) {
+  // 复习：schedule_id + wrong_question_id；审核：question id
+  return `${item.subject || '?'}#${item.board_name || '?'}#${item.wq_id || item.q_id || ''}`;
+}
+function addToPrintQueue(item) {
+  loadPrintQueue();
+  const k = printQueueKeyOf(item);
+  const existing = PRINT_QUEUE.findIndex(x => printQueueKeyOf(x) === k);
+  if (existing >= 0) {
+    PRINT_QUEUE.splice(existing, 1);
+    toast('已从打印列表移除');
+  } else {
+    PRINT_QUEUE.push(item);
+    toast(`已加入打印列表（共 ${PRINT_QUEUE.length} 题）`);
+  }
+  savePrintQueue();
+  renderPrintFAB();
+}
+function renderPrintFAB() {
+  const fab = document.getElementById('printFab');
+  if (!fab) return;
+  const n = PRINT_QUEUE.length;
+  fab.style.display = n > 0 ? 'flex' : 'none';
+  document.getElementById('printFabCount').textContent = n;
+}
+function openPrintQueueModal() {
+  // 复用 openPrintModal：把队列项作为 qList，按学科自动分组
+  if (!PRINT_QUEUE.length) return;
+  openPrintModal(PRINT_QUEUE, {
+    title: '打印列表 · 按学科分组',
+    sub: `共 ${PRINT_QUEUE.length} 题 · 请作答后对照答案批改`,
+    groupBySubject: true,
+    onClear: () => { PRINT_QUEUE = []; savePrintQueue(); renderPrintFAB(); closePrintModal(); toast('已清空打印列表'); },
+  });
+}
 
 async function renderReview() {
   const container = document.getElementById('view-review');
@@ -630,7 +690,7 @@ function reviewCard(r) {
       <button class="btn btn-success btn-sm" data-review="correct" data-rid="${r.id}">✓ 答对了</button>
       <button class="btn btn-danger btn-sm" data-review="wrong" data-rid="${r.id}">✗ 答错了</button>
       <button class="btn btn-sm" data-answer="${r.id}" title="展开/收起这题的答案">👁 看答案</button>
-      <button class="btn btn-sm" data-printq="${r.id}" title="只打印这一题（隐藏答案），方便让孩子在纸上重做">🖨 打印这题</button>
+      <button class="btn btn-sm" data-printq="${r.id}" data-wq="${r.wrong_question_id}" title="把这题加入「打印列表」。加完可在右下角浮动按钮一键按学科排版打印。同一题再点会从列表移除。">📋 加入打印列表</button>
     </div>
     <div class="review-answer" id="rwa-${r.id}" style="display:none">
       <div>上次错答：<span class="wrong">${formatAnswer(r.student_answer)}</span></div>
@@ -678,14 +738,14 @@ function bindReviewEvents() {
     };
   });
 
-  // 单题打印（复习板块）：只打印这一题，隐藏答案，供孩子在纸上重做
+  // 「加入打印列表」（复习板块）：点一下加入队列，再点同一题会从队列移除（toggle）
   document.querySelectorAll('[data-printq]').forEach(btn => {
     btn.onclick = () => {
       const item = REVIEW_ITEMS_CACHE.find(x => String(x.id) === String(btn.dataset.printq));
       if (!item) { toast('找不到这道题，请刷新后重试'); return; }
-      openPrintModal([item], {
-        title: `${item.subject || ''} · ${item.board_name || '复习'} 打印版`,
-        sub: `第 ${(item.current_stage || 0) + 1} 次复习 · ${item.next_review_date || ''} · 共 1 题 · 请作答后对照答案批改`,
+      addToPrintQueue({
+        ...item,
+        wq_id: btn.dataset.wq || item.wrong_question_id,
       });
     };
   });
@@ -1096,13 +1156,14 @@ async function openBoard(boardId, startCheckin) {
 
 async function openCheckin(cid) {
   const d = await get(`/checkin/${cid}`);
-  if (!d.ok) return;
+  if (!d.ok) { toast('加载失败：' + (d.error || '网络异常，请稍后再试')); return false; }
   CURRENT_CHECKIN = d.checkin;
   CURRENT_BOARD = d.checkin.board;
   document.getElementById('drawerTitle').textContent =
     `${CURRENT_BOARD.subject} · ${CURRENT_BOARD.name}`;
   openDrawer();
   renderDrawer();
+  return true;
 }
 
 function renderCheckinForm() {
@@ -1576,6 +1637,12 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('drawerClose').onclick = closeDrawer;
   document.getElementById('drawerMask').onclick = closeDrawer;
 
+  // 打印列表浮动按钮：从 localStorage 恢复 + 渲染 + 绑定点击
+  loadPrintQueue();
+  renderPrintFAB();
+  const printFab = document.getElementById('printFab');
+  if (printFab) printFab.onclick = openPrintQueueModal;
+
   // 作业上传弹窗
   const hwModalMask = document.getElementById('hwModalMask');
   const hwModal = document.getElementById('hwModal');
@@ -1843,7 +1910,7 @@ function renderReviewModal() {
     html += `<div class="review-question-edit ${stateCls}" data-qidx="${idx}">
       <div class="rqe-header">
         <div><span class="rqe-num">${idx + 1}</span> <span class="rqe-status">${stateText}</span></div>
-        <button class="btn btn-sm" data-ract="printSingle" data-qidx="${idx}">🖨 单题打印</button>
+        <button class="btn btn-sm" data-ract="printSingle" data-qidx="${idx}" title="把这题加入「打印列表」（右下角浮动按钮一键按学科排版打印）。同一题再点会从列表移除。">📋 加入打印列表</button>
       </div>
       <div class="rqe-field">
         <label>题目原文（必须从照片中原样提取印刷体，不要改写）<span class="tip">可编辑 · Ctrl+Z 撤销</span></label>
@@ -1914,14 +1981,27 @@ function renderReviewModal() {
   document.getElementById('reviewModalMask').onclick = closeReviewModal;
 
   // 整批打回重识别：AI 漏题时用（单题打回不够）
+  // ——用内联表单代替 window.prompt()，保证左侧照片永远可见，方便对照原图写意见
   const btnRerunAll = document.getElementById('btnRerunAll');
-  if (btnRerunAll) {
-    btnRerunAll.onclick = async () => {
-      const c = prompt(
-        '整批打回：让 AI 重新看照片识别全部题目。\n' +
-        '请说明漏了什么 / 哪里没识别出来（会一起发给 AI，可选）：'
-      );
-      if (c === null) return;
+  const rerunBox = document.getElementById('rerunAllBox');
+  if (btnRerunAll && rerunBox) {
+    btnRerunAll.onclick = () => {
+      // 切换显示：第一次点显示，再次点收起
+      rerunBox.classList.toggle('show');
+      if (rerunBox.classList.contains('show')) {
+        const ta = document.getElementById('rerunAllComment');
+        if (ta) { ta.value = ''; ta.focus(); }
+        btnRerunAll.textContent = '🔄 收起整批打回';
+      } else {
+        btnRerunAll.textContent = '🔄 全部重新识别';
+      }
+    };
+    document.getElementById('rerunAllCancel').onclick = () => {
+      rerunBox.classList.remove('show');
+      btnRerunAll.textContent = '🔄 全部重新识别';
+    };
+    document.getElementById('rerunAllConfirm').onclick = async () => {
+      const c = (document.getElementById('rerunAllComment').value || '').trim();
       if (!confirm(
         `将把这份作业的 ${questions.length} 题全部打回，让 AI 重新识别。\n\n` +
         '· 当前这一版的审核结果会归档为历史版本，不会丢\n' +
@@ -2051,7 +2131,17 @@ async function handleReviewModalAction(act, idx) {
   }
 
   if (act === 'printSingle') {
-    openPrintModal([q]);
+    const b = CURRENT_BOARD;
+    addToPrintQueue({
+      q_id: q.id,
+      subject: b?.subject || '',
+      board_name: b?.name || '',
+      kp_name: q.knowledge_point || '',
+      content: q.content,
+      correct_answer: q.correct_answer,
+      student_answer: q.student_answer,
+      error_type: q.error_type,
+    });
   }
 }
 
@@ -2068,17 +2158,62 @@ function openPrintModal(qList, opts) {
     || `${esc(checkin.checkin_date || '')} · 共 ${qList.length} 题 · 请作答后对照答案批改`;
   let html = `<div class="print-sheet-title">${esc(title)}</div>
     <div class="print-sheet-sub">${sub}</div>`;
-  qList.forEach((q, i) => {
-    html += `<div class="print-question">
-      <div class="print-question-num">${i + 1}.</div>
-      <div class="print-question-content">${esc(q.content)}</div>
-      <div class="print-question-answer-line"></div>
-    </div>`;
-  });
+
+  // 按学科分组（自动排版）：相同 subject 合并、学科内部按 board_name 排序、题号连续
+  if (opts.groupBySubject) {
+    const groups = {};
+    qList.forEach((q, i) => {
+      const sub = q.subject || '其他';
+      if (!groups[sub]) groups[sub] = [];
+      groups[sub].push({ ...q, _originalIdx: i });
+    });
+    Object.keys(groups).sort().forEach((sub, gi) => {
+      html += `<div class="print-subject-block">
+        <div class="print-subject-title">${esc(sub)}（${groups[sub].length} 题）</div>`;
+      // 学科内按 board_name 分小标题
+      const byBoard = {};
+      groups[sub].forEach(q => {
+        const bn = q.board_name || '其他';
+        if (!byBoard[bn]) byBoard[bn] = [];
+        byBoard[bn].push(q);
+      });
+      Object.keys(byBoard).forEach(bn => {
+        html += `<div class="print-board-title">📘 ${esc(bn)}</div>`;
+        byBoard[bn].forEach(q => {
+          html += `<div class="print-question">
+            <div class="print-question-num">${q._originalIdx + 1}.</div>
+            <div class="print-question-content">${esc(q.content)}</div>
+            <div class="print-question-answer-line"></div>
+          </div>`;
+        });
+      });
+      html += `</div>`;
+    });
+  } else {
+    qList.forEach((q, i) => {
+      html += `<div class="print-question">
+        <div class="print-question-num">${i + 1}.</div>
+        <div class="print-question-content">${esc(q.content)}</div>
+        <div class="print-question-answer-line"></div>
+      </div>`;
+    });
+  }
+
   html += `<div style="margin-top:30px;font-size:12px;color:#999;text-align:center">— 答案见家长端「错题本」—</div>`;
+  // 「清空打印列表」按钮（仅当从队列预览打开时显示）
+  if (opts.onClear) {
+    html += `<div class="print-queue-actions">
+      <button class="btn btn-sm" id="btnClearPrintQueue">🗑 清空打印列表</button>
+      <button class="btn btn-sm" onclick="closePrintModal()">关闭</button>
+    </div>`;
+  }
   document.getElementById('printModalBody').innerHTML = html;
   document.getElementById('printModalMask').classList.add('show');
   document.getElementById('printModal').classList.add('show');
+  if (opts.onClear) {
+    const btn = document.getElementById('btnClearPrintQueue');
+    if (btn) btn.onclick = opts.onClear;
+  }
 }
 
 function closePrintModal() {

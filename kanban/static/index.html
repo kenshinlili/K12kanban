@@ -78,6 +78,17 @@
     </div>
   </div>
   <div class="review-modal-body">
+    <!-- 整批打回内联表单（默认折叠，点"🔄 全部重新识别"展开）。不用 prompt()，
+         保证左侧照片永远可见，能边看图边写意见 -->
+    <div id="rerunAllBox" class="rerun-all-box">
+      <div class="rerun-all-title">🔄 整批打回重识别</div>
+      <div class="rerun-all-tip">请说明漏了哪些题 / 哪里没识别出来，会一起发给 AI（可选）：</div>
+      <textarea id="rerunAllComment" rows="3" placeholder="例：漏题，第六题的4. 有错误"></textarea>
+      <div class="rerun-all-actions">
+        <button class="btn btn-danger" id="rerunAllConfirm">打回</button>
+        <button class="btn btn-sm" id="rerunAllCancel">取消</button>
+      </div>
+    </div>
     <div class="review-modal-left" id="reviewModalLeft">
       <!-- 左侧照片区 -->
     </div>
@@ -140,6 +151,12 @@
 
 <!-- 提示 -->
 <div class="toast" id="toast"></div>
+
+<!-- 打印列表浮动按钮（右下角）。N=0 时隐藏。
+     点击 → 弹打印预览弹窗（按学科自动分组排版），可直接走 window.print() -->
+<button id="printFab" class="print-fab" title="查看打印列表，按学科自动排版" style="display:none">
+  🖨 打印列表 (<span id="printFabCount">0</span>)
+</button>
 
 <script src="/static/app.js"></script>
 </body>
