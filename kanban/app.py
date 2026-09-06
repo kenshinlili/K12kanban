@@ -462,6 +462,13 @@ def api_restore():
 # GitHub 状态缓存，避免前端轮询时频繁请求 API（30 秒）
 _GITHUB_STATUS_CACHE = (0, None)
 
+# GitHub 连通性熔断器（详见 fetch_github_head 文档）：
+# 云端沙箱到 GitHub 实测全不通，串行遍历 7 镜像 × 8s 超时 = 17~20s，
+# 会让前端每次刷新都卡。连续失败后熔断一段时间，期间不发起网络请求。
+_GH_CIRCUIT = {'fails': 0, 'open_until': 0}
+_GH_CIRCUIT_FAILS = 3        # 连续失败几次后熔断
+_GH_CIRCUIT_COOLDOWN = 600   # 熔断时长（秒）——10 分钟后自动重试一次
+
 # ---------------------------------------------------------------------------
 # GitHub 镜像加速：云端沙箱直连 codeload.github.com / api.github.com 常被 TLS 拦截，
 # 这里用公益镜像做「前缀代理」竞速。所有镜像都是 URL 前缀代理形式：
@@ -542,20 +549,48 @@ def fetch_via_mirrors(raw_url, kind='api', timeout=10, max_bytes=None):
     return None, None
 
 
-def fetch_github_head(repo='kenshinlili/K12kanban', branch='master'):
-    """查询 GitHub 指定分支最新 commit（含提交时间），带 30 秒本地缓存。
+def fetch_github_head(repo='kenshinlili/K12kanban', branch='master', force=False):
+    """查询 GitHub 指定分支最新 commit（含提交时间），带 30 秒本地缓存 + 失败熔断。
 
     走镜像竞速：先直连 api.github.com，失败则依次尝试公益镜像。
     返回 commit/short/date（commit 的提交时间 ISO8601），date 用于 sync 守门判断新旧。
+
+    为什么需要熔断（force 参数）
+    ---------------------------
+    实测：WorkBuddy 云端沙箱到 GitHub 的 7 个通道**全部不通**（直连超时、镜像
+    HTTPError/DNS 失败）。而 fetch_via_mirrors 是**串行**遍历，每个 timeout=8s，
+    于是每次缓存过期都要耗 **17~20 秒** 才能返回失败。
+
+    前端每次刷新/切换都会调 /api/status → 表现为"点什么都卡 5 秒以上"。
+
+    熔断规则：连续失败 _GH_CIRCUIT_FAILS 次后，熔断 _GH_CIRCUIT_COOLDOWN 秒，
+    期间不再发起任何网络请求，直接返回上次的失败结果（毫秒级）。
+    - 日常 /api/status：走熔断（force=False），快
+    - 用户主动点同步：force=True 强制真查一次（那时等几秒是可接受的）
     """
     global _GITHUB_STATUS_CACHE
     now = time.time()
+
+    # ① 熔断期内（且非强制）→ 立即返回，不碰网络
+    if not force and now < _GH_CIRCUIT['open_until']:
+        cached = _GITHUB_STATUS_CACHE[1]
+        if cached is not None:
+            return dict(cached, circuit=True)
+        return {'commit': 'unknown', 'short': 'unknown', 'branch': branch,
+                'error': 'github unreachable (circuit open)', 'circuit': True}
+
+    # ② 30 秒缓存
     if now - _GITHUB_STATUS_CACHE[0] < 30 and _GITHUB_STATUS_CACHE[1] is not None:
         return _GITHUB_STATUS_CACHE[1]
 
     raw_url = f'https://api.github.com/repos/{repo}/commits/{branch}'
     data_bytes, used = fetch_via_mirrors(raw_url, kind='api', timeout=8, max_bytes=2 * 1024 * 1024)
     if data_bytes is None:
+        # 失败：累计熔断计数
+        _GH_CIRCUIT['fails'] += 1
+        if _GH_CIRCUIT['fails'] >= _GH_CIRCUIT_FAILS:
+            _GH_CIRCUIT['open_until'] = now + _GH_CIRCUIT_COOLDOWN
+            _GH_CIRCUIT['fails'] = 0
         result = {'commit': 'unknown', 'short': 'unknown', 'branch': branch,
                   'error': 'all mirrors failed'}
         _GITHUB_STATUS_CACHE = (now, result)
@@ -574,6 +609,9 @@ def fetch_github_head(repo='kenshinlili/K12kanban', branch='master'):
             'date': commit_date,
             'via': used,
         }
+        # 成功 → 立即复位熔断器（网络恢复了就正常走实时检查）
+        _GH_CIRCUIT['fails'] = 0
+        _GH_CIRCUIT['open_until'] = 0
         _GITHUB_STATUS_CACHE = (now, result)
         return result
     except Exception as e:
@@ -672,7 +710,7 @@ def api_sync():
 
     # ---- 主线程守门：GitHub 未领先则直接 409，让前端立即知道原因 ----
     try:
-        gh_head = fetch_github_head(repo, branch)
+        gh_head = fetch_github_head(repo, branch, force=True)
         gh_date = gh_head.get('date')
         cloud_date = VERSION.get('commit_date')
         gh_commit = gh_head.get('commit') or 'unknown'
@@ -713,7 +751,7 @@ def api_sync():
         try:
             # ---- 版本守门：GitHub 未领先则中止 ----
             try:
-                gh_head = fetch_github_head(repo, branch)
+                gh_head = fetch_github_head(repo, branch, force=True)
                 gh_date = gh_head.get('date')
                 cloud_date = VERSION.get('commit_date')
                 if (gh_head.get('commit') not in (None, 'unknown')
@@ -767,7 +805,7 @@ def api_sync():
                     shutil.copy2(os.path.join(root, f), os.path.join(target_root, f))
             _SYNC_STATE['phase'] = 'write_version'
             try:
-                gh_head = fetch_github_head(repo, branch)
+                gh_head = fetch_github_head(repo, branch, force=True)
                 if gh_head.get('commit') and gh_head['commit'] != 'unknown':
                     with open(os.path.join(BASE_DIR, 'version.json'), 'w', encoding='utf-8') as _vf:
                         json.dump({
