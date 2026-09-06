@@ -77,7 +77,24 @@ app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024
 # ---------------- helpers ----------------
 
 def row2dict(r):
-    return {k: r[k] for k in r.keys()}
+    """把 sqlite3.Row 转为 dict，并对 JSON 字段自动反序列化。
+
+    注意：数据库里 `wrong_questions.answer_candidates` 是 TEXT (json.dumps)，
+    读出来如果不还原成 list，前端 `arr.map()` 会直接崩。"""
+    d = {k: r[k] for k in r.keys()}
+    for json_key in ('answer_candidates',):
+        if json_key in d:
+            v = d[json_key]
+            if isinstance(v, str) and v.strip():
+                try:
+                    parsed = json.loads(v)
+                    d[json_key] = parsed if isinstance(parsed, list) else []
+                except (json.JSONDecodeError, ValueError):
+                    # 历史脏数据（不是合法 JSON 字符串）→ 清空，避免前端炸
+                    d[json_key] = []
+            elif not v:
+                d[json_key] = []
+    return d
 
 
 def allowed_file(filename):

@@ -1882,7 +1882,8 @@ function renderReviewModal() {
 }
 
 function renderAnswerCandidates(idx, candidates) {
-  if (!candidates || !candidates.length) return '';
+  // 兜底：万一 candidates 是字符串/对象（历史脏数据）也不会崩
+  if (!Array.isArray(candidates) || !candidates.length) return '';
   const safe = arr => arr.map(c => esc(String(c.answer || ''))).filter(Boolean);
   const vals = safe(candidates);
   if (!vals.length) return '';
