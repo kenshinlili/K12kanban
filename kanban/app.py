@@ -941,13 +941,27 @@ def api_checkin():
 
 @app.route('/api/checkin/<int:cid>', methods=['DELETE'])
 def api_checkin_delete(cid):
-    """撤销打卡（返回）"""
+    """撤销打卡（daily）或删除作业（homework）。支持 ?kind=daily|homework 守门。
+
+    V1.10 起每日打卡与作业已解耦：cid 是 checkins 表里 entry_type='daily' 或 'homework' 的两条独立记录。
+    本接口按 checkin_id 删关联数据 —— 不会跨 cid 误伤 —— 但为防前端错用接口，加 kind 守门：
+      - ?kind=daily   但 ci.entry_type != 'daily'   → 400 拒绝（建议去"作业区"删）
+      - ?kind=homework 但 ci.entry_type != 'homework' → 400 拒绝
+      - 不传 kind → 兼容旧调用，按原行为删关联表（向后兼容）
+    """
     member_id = request.args.get('member_id') or 'dad'
+    kind = request.args.get('kind')
     conn = db.get_conn()
     try:
         ci = conn.execute('SELECT * FROM checkins WHERE id=?', (cid,)).fetchone()
         if not ci:
             return jsonify({'ok': False, 'error': 'not found'}), 404
+        actual_kind = ci['entry_type']
+        if kind and kind != actual_kind:
+            advice = ('请去作业区右键删除这条作业' if kind == 'daily' and actual_kind == 'homework'
+                      else '作业上传请用传作业入口，不要从打卡撤销')
+            return jsonify({'ok': False,
+                            'error': f'cid {cid} 是 {actual_kind} 而非 {kind}，{advice}'}), 400
         photos = conn.execute(
             'SELECT filename FROM photos WHERE checkin_id=?', (cid,)).fetchall()
         for p in photos:
@@ -958,7 +972,7 @@ def api_checkin_delete(cid):
         conn.execute('DELETE FROM review_actions WHERE checkin_id=?', (cid,))
         conn.execute('DELETE FROM checkins WHERE id=?', (cid,))
         conn.commit()
-        return jsonify({'ok': True})
+        return jsonify({'ok': True, 'kind': actual_kind})
     finally:
         conn.close()
 

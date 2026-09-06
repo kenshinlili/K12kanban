@@ -1498,13 +1498,28 @@ function bindDrawerEvents() {
 }
 
 async function undoCheckin(boardId, cid) {
-  if (!confirm('确定撤销今日打卡？照片和识别记录会一并删除。')) return;
+  // 解耦后正确识别 entry_type：daily 撤销不会动作业，homework 删除才是删照片与识别记录
+  let entryType = 'daily';   // 兜底：旧调用场景默认视为 daily
+  if (cid && CURRENT_CHECKIN && CURRENT_CHECKIN.id === cid) {
+    entryType = CURRENT_CHECKIN.entry_type || 'daily';
+  } else if (!cid) {
+    // 从卡片撤：STATE.data.boards[].checkin 必是 daily（api_state 按 entry_type='daily' 查）
+    entryType = 'daily';
+  }
+  const msg = entryType === 'homework'
+    ? '确定删除这条作业记录？照片和识别结果会一并删除。'
+    : '确定撤销今日打卡？作业和识别记录不会受影响。';
+  if (!confirm(msg)) return;
   const target = cid || (STATE.data.boards.find(b => b.id === boardId)?.checkin?.id);
   if (!target) return;
-  await del(`/checkin/${target}?member_id=${STATE.member}`);
-  toast('已撤销打卡');
-  closeDrawer();
-  await loadState();
+  const r = await del(`/checkin/${target}?member_id=${STATE.member}&kind=${entryType}`);
+  if (r.ok) {
+    toast(entryType === 'homework' ? '已删除作业' : '已撤销打卡');
+    closeDrawer();
+    await loadState();
+  } else {
+    toast(r.error || '操作失败');
+  }
 }
 
 /* ---------- 初始化 ---------- */
