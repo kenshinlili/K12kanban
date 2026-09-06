@@ -19,6 +19,10 @@ ENV/
 *.swp
 *.swo
 
+# 备份文件：一律不准进代码目录（用户数据，避免 push 污染 + deploy 误传）
+*.zip
+kanban-backup-*.zip
+
 # Application data - keep all runtime data out of version control
 instance/
 .backup_tmp/
