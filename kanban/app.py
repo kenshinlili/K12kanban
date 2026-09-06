@@ -28,6 +28,11 @@ os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.environ['KANBAN_DB_PATH'] = os.path.join(DATA_DIR, 'kanban.db')
 
+# 数据自愈：deploy 整目录替换会清空 instance/，
+# 这里在启动最早期检测——数据没了就从「上传目录之外」的快照自动恢复。
+import persist
+_PERSIST_MSG = persist.ensure_data(INSTANCE_DIR)
+
 import db
 
 try:
@@ -405,6 +410,12 @@ def api_restore():
             os.remove(tmp_zip_path)
         except Exception:
             pass
+
+    # 恢复成功：立刻做一份持久化快照，这样下次 deploy 也能自动恢复，不必再手工备份
+    try:
+        persist.snapshot(INSTANCE_DIR)
+    except Exception:
+        pass
 
     # 数据恢复成功，启动接替进程重启以重新加载数据库
     threading.Thread(target=lambda: _spawn_successor_and_exit(delay=2), daemon=True).start()
@@ -2052,8 +2063,24 @@ def api_review_stats():
         conn.close()
 
 
+@app.route('/api/persist')
+def api_persist():
+    """数据持久化护盾状态：deploy 后能否自动恢复数据，一眼可查。"""
+    st = persist.status()
+    st['ok'] = True
+    st['instance_dir'] = INSTANCE_DIR
+    st['has_data'] = persist.has_data(INSTANCE_DIR)
+    st['startup_restore'] = list(_PERSIST_MSG) if _PERSIST_MSG else None
+    return jsonify(st)
+
+
 if __name__ == '__main__':
     db.init_db()
+    # 数据有变化就自动快照，保证 deploy 前持久化副本足够新
+    try:
+        persist.start_auto_snapshot(INSTANCE_DIR, interval=90)
+    except Exception:
+        pass
     _defer = os.environ.get('KANBAN_DEFER')
     if _defer:
         time.sleep(int(_defer))
