@@ -490,6 +490,9 @@ async function renderTodo() {
 }
 
 
+// 复习板块当前渲染的题目列表缓存（供"🖨 打印这题"按 schedule id 反查完整题目对象）
+let REVIEW_ITEMS_CACHE = [];
+
 async function renderReview() {
   const container = document.getElementById('view-review');
   const badge = document.getElementById('reviewBadge');
@@ -502,6 +505,8 @@ async function renderReview() {
   const stats = statsR;
   const due = dueR.items;
   const done = doneR.items || [];
+  // 打印按钮要按 id 反查完整题目对象（content 等），缓存本次渲染的列表
+  REVIEW_ITEMS_CACHE = (due || []).concat(done || []);
   badge.textContent = stats.due;
   badge.classList.toggle('zero', stats.due === 0);
 
@@ -624,7 +629,8 @@ function reviewCard(r) {
     <div class="review-actions" style="margin-top:11px">
       <button class="btn btn-success btn-sm" data-review="correct" data-rid="${r.id}">✓ 答对了</button>
       <button class="btn btn-danger btn-sm" data-review="wrong" data-rid="${r.id}">✗ 答错了</button>
-      <button class="btn btn-sm" data-answer="${r.id}">👁 看答案</button>
+      <button class="btn btn-sm" data-answer="${r.id}" title="展开/收起这题的答案">👁 看答案</button>
+      <button class="btn btn-sm" data-printq="${r.id}" title="只打印这一题（隐藏答案），方便让孩子在纸上重做">🖨 打印这题</button>
     </div>
     <div class="review-answer" id="rwa-${r.id}" style="display:none">
       <div>上次错答：<span class="wrong">${formatAnswer(r.student_answer)}</span></div>
@@ -669,6 +675,18 @@ function bindReviewEvents() {
       }
       await loadState();
       renderReview();
+    };
+  });
+
+  // 单题打印（复习板块）：只打印这一题，隐藏答案，供孩子在纸上重做
+  document.querySelectorAll('[data-printq]').forEach(btn => {
+    btn.onclick = () => {
+      const item = REVIEW_ITEMS_CACHE.find(x => String(x.id) === String(btn.dataset.printq));
+      if (!item) { toast('找不到这道题，请刷新后重试'); return; }
+      openPrintModal([item], {
+        title: `${item.subject || ''} · ${item.board_name || '复习'} 打印版`,
+        sub: `第 ${(item.current_stage || 0) + 1} 次复习 · ${item.next_review_date || ''} · 共 1 题 · 请作答后对照答案批改`,
+      });
     };
   });
 }
@@ -1851,11 +1869,11 @@ function renderReviewModal() {
         </div>
       </div>
       <div class="rqe-actions">
-        <button class="btn btn-primary" data-ract="save" data-qidx="${idx}">💾 保存修改</button>
-        <button class="btn btn-success" data-ract="confirm" data-qidx="${idx}">✓ 确认错题</button>
-        <button class="btn btn-danger" data-ract="reject" data-qidx="${idx}">✗ 识别有误</button>
-        <button class="btn btn-sm" data-ract="rerun" data-qidx="${idx}">🔄 重新识别</button>
-        <button class="btn btn-sm" data-ract="blank" data-qidx="${idx}">⬜ 一键整理为印刷体</button>
+        <button class="btn btn-primary" data-ract="save" data-qidx="${idx}" title="只保存你手动改的文字，不改变题的状态（仍是待审）">💾 保存修改</button>
+        <button class="btn btn-success" data-ract="confirm" data-qidx="${idx}" title="确认这题是对的（不改 AI 识别结果，或保存你改完的结果），确认后进入错题本并安排复习">✓ 确认错题</button>
+        <button class="btn btn-danger" data-ract="reject" data-qidx="${idx}" title="标记这题识别错误（不会让 AI 重跑，由你自己手动改题）。适合「AI 识别错了但我不想再花积分调 AI」">✗ 识别有误</button>
+        <button class="btn btn-sm" data-ract="rerun" data-qidx="${idx}" title="让 AI 重新看照片识别这题（会进入待重识别队列，等外部 AI 回填）。单题漏识别用这个，整批漏题请用顶部「🔄 全部重新识别」">🔄 重新识别</button>
+        <button class="btn btn-sm" data-ract="blank" data-qidx="${idx}" title="OCR 输出常带括号答案（如「潮来时的情景」），此按钮一键把答案与学生作答处替换为 ______，方便打印给孩子重做。手动改具体文字请直接编辑「题目原文」框">⬜ 一键整理为印刷体</button>
       </div>
       ${q.review_comment ? `<div class="wq-comment">💬 ${esc(q.review_comment)}</div>` : ''}
     </div>`;
@@ -1894,6 +1912,32 @@ function renderReviewModal() {
   document.getElementById('btnPrintPreview').onclick = () => openPrintModal(questions);
   document.getElementById('btnCloseReviewModal').onclick = closeReviewModal;
   document.getElementById('reviewModalMask').onclick = closeReviewModal;
+
+  // 整批打回重识别：AI 漏题时用（单题打回不够）
+  const btnRerunAll = document.getElementById('btnRerunAll');
+  if (btnRerunAll) {
+    btnRerunAll.onclick = async () => {
+      const c = prompt(
+        '整批打回：让 AI 重新看照片识别全部题目。\n' +
+        '请说明漏了什么 / 哪里没识别出来（会一起发给 AI，可选）：'
+      );
+      if (c === null) return;
+      if (!confirm(
+        `将把这份作业的 ${questions.length} 题全部打回，让 AI 重新识别。\n\n` +
+        '· 当前这一版的审核结果会归档为历史版本，不会丢\n' +
+        '· AI 重跑后题目回到「待审」，需要你重新过一遍\n\n' +
+        '确定打回吗？'
+      )) return;
+      const r = await post(`/checkin/${checkin.id}/request-rerun`, { comment: c, member_id: STATE.member });
+      if (!r.ok) { toast('打回失败：' + (r.error || '未知')); return; }
+      toast(`🔄 已打回为第 ${r.version} 版，等待 AI 重新识别`);
+      closeReviewModal();
+      await loadState();
+      // 抽屉里的数据要跟着刷新，否则看到的还是旧题
+      const d = await get(`/checkin/${checkin.id}`);
+      if (d.ok) { CURRENT_CHECKIN = d.checkin; renderDrawer(); }
+    };
+  }
 }
 
 function renderAnswerCandidates(idx, candidates) {
@@ -2012,12 +2056,18 @@ async function handleReviewModalAction(act, idx) {
 }
 
 /* ---------- 打印版预览 ---------- */
-function openPrintModal(qList) {
+function openPrintModal(qList, opts) {
+  opts = opts || {};
+  // 注意：REVIEW_MODAL_DATA 只在分屏审核打开时才有。复习板块调本函数时它是 null，
+  // 所以标题/副标题允许调用方自定义（opts.title / opts.sub），否则会套用上一次审核的板块名。
   const { checkin } = REVIEW_MODAL_DATA || { checkin: { checkin_date: '' } };
   const board = CURRENT_BOARD;
-  const title = `${board?.subject || ''} · ${board?.name || '错题'} 打印版`;
+  const title = opts.title
+    || `${board?.subject || ''} · ${board?.name || '错题'} 打印版`;
+  const sub = opts.sub
+    || `${esc(checkin.checkin_date || '')} · 共 ${qList.length} 题 · 请作答后对照答案批改`;
   let html = `<div class="print-sheet-title">${esc(title)}</div>
-    <div class="print-sheet-sub">${esc(checkin.checkin_date || '')} · 共 ${qList.length} 题 · 请作答后对照答案批改</div>`;
+    <div class="print-sheet-sub">${sub}</div>`;
   qList.forEach((q, i) => {
     html += `<div class="print-question">
       <div class="print-question-num">${i + 1}.</div>
