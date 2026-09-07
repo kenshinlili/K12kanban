@@ -231,7 +231,7 @@ function boardCard(b) {
         <button class="btn btn-skip btn-sm" data-act="skip">— 今日无任务</button>
       </div>
       <div class="bc-actions" style="margin-top:6px">
-        <button class="btn btn-sm" data-act="upload-hw">📷 传作业</button>
+        <button class="btn btn-sm" data-act="upload-hw" title="创建一条独立作业记录（拍照给 AI 识别错题）。作业与今日打卡互相独立，取消打卡不会删作业">📚 传作业</button>
       </div>
     </div>`;
   }
@@ -249,7 +249,8 @@ function boardCard(b) {
   let actions = '';
   if (st === 'skipped') {
     statusBadge = `<span class="status-pill sp-skipped">— 今日无任务</span>`;
-    actions = `<button class="btn btn-danger btn-sm" data-act="undo">↩ 返回</button>`;
+    actions = `<button class="btn btn-sm" data-act="upload-hw" title="创建一条独立作业记录，与今日打卡互不影响">📚 传作业</button>`
+      + `<button class="btn btn-danger btn-sm" data-act="undo">↩ 返回</button>`;
   } else {
     const pill = `<span class="status-pill sp-${st}">${STATUS_TEXT[st] || st}</span>`;
     statusBadge = `<div class="done-row">
@@ -258,6 +259,7 @@ function boardCard(b) {
     </div>`;
     actions = `<button class="btn btn-sm" data-act="open">查看详情</button>`;
     if (needAttention) actions = `<button class="btn btn-warn btn-sm" data-act="review">去处理</button>` + actions;
+    actions += `<button class="btn btn-sm" data-act="upload-hw" title="再传一次作业（可反复提交，如单元考考几次）">📚 传作业</button>`;
     actions += `<button class="btn btn-danger btn-sm" data-act="undo">↩ 返回</button>`;
   }
 
@@ -325,7 +327,8 @@ async function delHomework(cid) {
 /* ---------- 作业上传弹窗 ---------- */
 let HW_PHOTOS = [];   // 待上传的 File 列表
 
-function openHomeworkModal(boardId) {
+// presetKpId：从知识点「作业历史」弹层进来时预选知识点，免得再选一遍
+function openHomeworkModal(boardId, presetKpId) {
   HW_PHOTOS = [];
   const boardSel = document.getElementById('hwBoard');
   const kpSel = document.getElementById('hwKp');
@@ -352,6 +355,8 @@ function openHomeworkModal(boardId) {
   }
   boardSel.onchange = () => fillKp(boardSel.value);
   fillKp(boardId || boardSel.value);
+  // 从知识点作业历史进来：直接预选该知识点（父级「单元」或子级「课文」都已在选项里）
+  if (presetKpId) kpSel.value = String(presetKpId);
 
   // 日期默认今天
   document.getElementById('hwDate').value = STATE.date || todayStr();
@@ -377,6 +382,86 @@ function closeHomeworkModal() {
   document.getElementById('hwModal').classList.remove('show');
   document.getElementById('hwModalMask').classList.remove('show');
   HW_PHOTOS = [];
+}
+
+/* ---------- 知识点作业历史弹层（V1.21）----------
+   从知识点全景图的 chip 点进来：看这个知识点下每一次作业。
+   同一课可以反复提交（单元考考几次是常态），每次一条记录、各自独立状态。
+   状态：待识别 → 待审核 → 已完成；不满意可打回重跑（待重跑）。 */
+let KPHW_CTX = null;   // 当前弹层的知识点上下文，供「上传新作业」预填
+
+async function openKpHwModal(kpId) {
+  const r = await get(`/knowledge-point/${kpId}/homeworks`);
+  if (!r.ok) { toast(r.error || '加载作业历史失败'); return; }
+  const { kp, board, homeworks } = r;
+  KPHW_CTX = {
+    kp_id: kp.id,
+    board_id: board ? board.id : null,
+    kp_name: kp.name,
+    board_name: board ? board.name : '',
+  };
+
+  const head = [
+    board ? `${esc(board.subject)} · ${esc(board.name)}` : '',
+    esc(kp.name),
+  ].filter(Boolean).join(' · ');
+
+  let h = `<div class="kphw-head">
+    <div style="font-weight:700;font-size:15px">${head}</div>
+    <span class="kphw-count">共 ${homeworks.length} 次作业</span>
+  </div>`;
+
+  if (!homeworks.length) {
+    h += `<div class="empty" style="padding:26px"><div class="emoji">📭</div>
+      <div>这个知识点还没有作业记录</div>
+      <div style="font-size:12px;color:var(--text-soft);margin-top:6px">
+        点下面「📤 上传新作业」交第一次；同一课考几次就传几次，每次都留痕</div></div>`;
+  } else {
+    h += homeworks.map(hw => {
+      const stText = STATUS_TEXT[hw.status] || hw.status;
+      return `<div class="kphw-item">
+        <div class="kphw-item-main">
+          <div class="kphw-item-date">📅 ${hw.checkin_date}</div>
+          <div class="kphw-item-meta">
+            <span class="status-pill sp-${hw.status}">${esc(stText)}</span>
+            ${hw.photo_count ? `<span>📷 ${hw.photo_count} 张</span>` : ''}
+            ${hw.wrong_count ? `<span>❌ ${hw.wrong_count} 题</span>` : ''}
+            ${hw.pending_count ? `<span style="color:var(--warn)">⏳ ${hw.pending_count} 题待审</span>` : ''}
+            ${hw.note ? `<span>📝 ${esc(hw.note)}</span>` : ''}
+          </div>
+        </div>
+        <div class="kphw-item-acts">
+          <button class="btn btn-sm" data-kphw-open="${hw.id}">👁 查看</button>
+          <button class="btn btn-danger btn-sm" data-kphw-del="${hw.id}">🗑</button>
+        </div>
+      </div>`;
+    }).join('');
+  }
+
+  document.getElementById('kpHwBody').innerHTML = h;
+  document.getElementById('kpHwModal').classList.add('show');
+  document.getElementById('kpHwMask').classList.add('show');
+
+  document.querySelectorAll('[data-kphw-open]').forEach(btn => {
+    btn.onclick = async () => {
+      await openCheckin(parseInt(btn.dataset.kphwOpen));
+    };
+  });
+  document.querySelectorAll('[data-kphw-del]').forEach(btn => {
+    btn.onclick = async () => {
+      if (!confirm('确定删除这次作业？\n照片和识别结果会一并删除（不可恢复）。')) return;
+      const rr = await del(`/checkin/${btn.dataset.kphwDel}?member_id=${STATE.member}&kind=homework`);
+      if (!rr.ok) { toast(rr.error || '删除失败'); return; }
+      toast('已删除这次作业');
+      await loadState();
+      await openKpHwModal(kpId);   // 刷新弹层内容
+    };
+  });
+}
+
+function closeKpHwModal() {
+  document.getElementById('kpHwModal').classList.remove('show');
+  document.getElementById('kpHwMask').classList.remove('show');
 }
 
 async function submitHomework() {
@@ -468,6 +553,7 @@ async function renderTodo() {
         <div class="todo-title">${esc(t.subject)} · ${esc(t.board_name)}</div>
         <div class="todo-meta">
           <span class="status-pill sp-${t.status}">${STATUS_TEXT[t.status]}</span>
+          <span class="todo-type ${t.entry_type === 'homework' ? 'hw' : 'daily'}">${t.entry_type === 'homework' ? '📚 作业' : '📋 打卡'}</span>
           <span>📅 ${t.checkin_date}</span>
           <span>📷 ${t.photo_count} 张</span>
         </div>
@@ -895,6 +981,24 @@ async function renderKnowledge() {
 
   function showManage() {
     let h = '';
+    // V1.21：统计每个知识点的作业次数（父级「单元」汇总其下所有课文）
+    const hwCount = {};
+    (STATE.data.homeworks || []).forEach(hw => {
+      if (hw.kp_id) hwCount[hw.kp_id] = (hwCount[hw.kp_id] || 0) + 1;
+    });
+    const childIdsOf = {};
+    Object.values(STATE.data.knowledge_points || {}).forEach(list => {
+      list.forEach(k => {
+        if (k.parent_id) (childIdsOf[k.parent_id] = childIdsOf[k.parent_id] || []).push(k.id);
+      });
+    });
+    const totalHw = kid =>
+      (hwCount[kid] || 0) + (childIdsOf[kid] || []).reduce((s, c) => s + (hwCount[c] || 0), 0);
+    const hwBadge = kid => {
+      const n = totalHw(kid);
+      return n ? `<span class="kp-hw-badge">📚${n}</span>` : '';
+    };
+
     SUBJECT_ORDER.forEach(sub => {
       const bs = boards.filter(b => b.subject === sub);
       if (!bs.length) return;
@@ -915,12 +1019,12 @@ async function renderKnowledge() {
             const kids = childrenOf(p.id);
             return `<div class="kp-unit">
               <div class="kp-unit-head">
-                <span class="kp-unit-name">${esc(p.name)}</span>
+                <span class="kp-unit-name kp-clickable" data-kphw="${p.id}" title="查看整个单元的作业历史">${esc(p.name)}${hwBadge(p.id)}</span>
                 <span class="kp-unit-count">${kids.length} 项</span>
                 <button class="kp-unit-del" data-kpdel="${p.id}" title="删除整个单元">✕</button>
               </div>
               ${kids.length ? `<div class="kp-list">${kids.map(k =>
-                `<div class="kp-chip">${esc(k.name)}
+                `<div class="kp-chip kp-clickable" data-kphw="${k.id}" title="查看这个知识点的作业历史（可反复提交）">${esc(k.name)}${hwBadge(k.id)}
                   <button class="del" data-kpdel="${k.id}" title="删除">×</button></div>`).join('')}
                 <button class="kp-add" data-kpadd="${b.id}" data-kpparent="${p.id}">+ 加课文</button>
               </div>` : `<div class="kp-list"><button class="kp-add" data-kpadd="${b.id}" data-kpparent="${p.id}">+ 加课文</button></div>`}
@@ -929,7 +1033,7 @@ async function renderKnowledge() {
         } else {
           // 扁平板块（校外/数学/英语）
           h += `<div class="kp-list" data-kpboard="${b.id}">
-            ${kps.map(k => `<div class="kp-chip">${esc(k.name)}
+            ${kps.map(k => `<div class="kp-chip kp-clickable" data-kphw="${k.id}" title="查看这个知识点的作业历史（可反复提交）">${esc(k.name)}${hwBadge(k.id)}
               <button class="del" data-kpdel="${k.id}" title="删除">×</button></div>`).join('')}
             <button class="kp-add" data-kpadd="${b.id}">+ 新增</button>
           </div>`;
@@ -940,6 +1044,10 @@ async function renderKnowledge() {
     });
     document.getElementById('kpBody').innerHTML = h;
     bindKpManageEvents();
+    // 点知识点 → 打开该知识点的作业历史
+    document.querySelectorAll('[data-kphw]').forEach(el => {
+      el.onclick = () => openKpHwModal(parseInt(el.dataset.kphw));
+    });
   }
 
   async function showHeatmap() {
@@ -1273,6 +1381,8 @@ async function renderDrawer() {
   </div>`;
 
   /* 照片 */
+  // V1.21：打卡与作业解耦 —— 只有作业能挂照片；打卡里的照片是历史遗留（可看可删，不能新增）
+  const canAddPhoto = ci.entry_type === 'homework';
   html += `<div class="section">
     <h3>📷 作业照片 <span class="sub">${ci.photos.length} 张</span></h3>
     <div class="photo-grid">
@@ -1280,13 +1390,15 @@ async function renderDrawer() {
         <img src="${p.url || '/uploads/' + p.filename}" onclick="window.open('${p.url || '/uploads/' + p.filename}','_blank')">
         <button class="photo-del" data-photodel="${p.id}">×</button>
       </div>`).join('')}
-      <div class="photo-add" id="photoAdd">
+      ${canAddPhoto ? `<div class="photo-add" id="photoAdd">
         <span class="plus">＋</span><span>拍照上传</span>
-      </div>
+      </div>` : ''}
     </div>
     <input type="file" id="photoInput" accept="image/*" multiple capture="environment" style="display:none">
     <p style="font-size:12px;color:var(--text-soft);margin-top:9px">
-      上传后进入「待识别」队列，AI 识别完成会出现在下方错题区等你审核
+      ${canAddPhoto
+        ? '上传后进入「待识别」队列，AI 识别完成会出现在下方错题区等你审核'
+        : '打卡不再挂照片。下面是历史遗留照片（可查看 / 删除，不能新增）；新作业请去「📚 传作业」'}
     </p>
   </div>`;
 
@@ -1577,23 +1689,27 @@ function bindDrawerEvents() {
 }
 
 async function undoCheckin(boardId, cid) {
-  // 解耦后正确识别 entry_type：daily 撤销不会动作业，homework 删除才是删照片与识别记录
+  // V1.21：打卡与作业彻底解耦，两者后果完全不同，文案必须说清
+  //   daily    取消 = 只取消今日完成标记，照片 / 错题 / AI 识别 **一个都不删**
+  //   homework 删除 = 完整清理这一次作业（照片 / 错题 / 识别）
   let entryType = 'daily';   // 兜底：旧调用场景默认视为 daily
   if (cid && CURRENT_CHECKIN && CURRENT_CHECKIN.id === cid) {
     entryType = CURRENT_CHECKIN.entry_type || 'daily';
   } else if (!cid) {
-    // 从卡片撤：STATE.data.boards[].checkin 必是 daily（api_state 按 entry_type='daily' 查）
+    // 从卡片撤：STATE.data.boards[].checkin 必是 daily
     entryType = 'daily';
   }
   const msg = entryType === 'homework'
-    ? '确定删除这条作业记录？照片和识别结果会一并删除。'
-    : '确定撤销今日打卡？作业和识别记录不会受影响。';
+    ? '确定删除这条作业记录？\n照片和识别结果会一并删除（不可恢复）。'
+    : '确定取消今日打卡？\n不会删除任何照片或识别记录，作业也不受影响。';
   if (!confirm(msg)) return;
   const target = cid || (STATE.data.boards.find(b => b.id === boardId)?.checkin?.id);
   if (!target) return;
   const r = await del(`/checkin/${target}?member_id=${STATE.member}&kind=${entryType}`);
   if (r.ok) {
-    toast(entryType === 'homework' ? '已删除作业' : '已撤销打卡');
+    toast(entryType === 'homework'
+      ? '已删除这次作业'
+      : '已取消打卡（照片和识别记录均已保留）');
     closeDrawer();
     await loadState();
   } else {
@@ -1656,6 +1772,21 @@ document.addEventListener('DOMContentLoaded', () => {
       for (const f of e.target.files) HW_PHOTOS.push(f);
       renderHwPhotoPreview();
       e.target.value = '';
+    };
+  }
+
+  // 知识点作业历史弹层（V1.21）
+  const kpHwMask = document.getElementById('kpHwMask');
+  const kpHwModal = document.getElementById('kpHwModal');
+  if (kpHwMask && kpHwModal) {
+    document.getElementById('btnCloseKpHw').onclick = closeKpHwModal;
+    document.getElementById('btnCloseKpHw2').onclick = closeKpHwModal;
+    kpHwMask.onclick = closeKpHwModal;
+    // 「上传新作业」：关掉历史弹层，打开上传弹窗并预选当前知识点
+    document.getElementById('btnKpHwUpload').onclick = () => {
+      if (!KPHW_CTX) return;
+      closeKpHwModal();
+      openHomeworkModal(KPHW_CTX.board_id, KPHW_CTX.kp_id);
     };
   }
 

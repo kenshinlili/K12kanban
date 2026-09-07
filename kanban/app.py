@@ -272,8 +272,10 @@ def api_state():
             'SELECT * FROM boards ORDER BY sort_order').fetchall()]
 
         for b in boards:
+            # V1.21：archived = 已取消的打卡，不算今日完成（但记录保留，照片识别都在）
             ci = conn.execute(
-                "SELECT * FROM checkins WHERE board_id=? AND checkin_date=? AND entry_type='daily'",
+                "SELECT * FROM checkins WHERE board_id=? AND checkin_date=? "
+                "AND entry_type='daily' AND (status IS NULL OR status!='archived')",
                 (b['id'], date)).fetchone()
             if ci:
                 b['checkin'] = row2dict(ci)
@@ -905,8 +907,10 @@ def api_checkin():
     try:
         # 每日打卡（daily）：同一板块同一天只能一条
         if entry_type == 'daily':
+            # 已取消（archived）的打卡不算数，允许当天重新打卡
             existing = conn.execute(
-                "SELECT * FROM checkins WHERE board_id=? AND checkin_date=? AND entry_type='daily'",
+                "SELECT * FROM checkins WHERE board_id=? AND checkin_date=? "
+                "AND entry_type='daily' AND (status IS NULL OR status!='archived')",
                 (board_id, date)).fetchone()
             if existing:
                 return jsonify({'ok': False, 'error': '今日已打卡'}), 409
@@ -939,13 +943,21 @@ def api_checkin():
 
 @app.route('/api/checkin/<int:cid>', methods=['DELETE'])
 def api_checkin_delete(cid):
-    """撤销打卡（daily）或删除作业（homework）。支持 ?kind=daily|homework 守门。
+    """取消打卡（daily）或删除作业（homework）。
 
-    V1.10 起每日打卡与作业已解耦：cid 是 checkins 表里 entry_type='daily' 或 'homework' 的两条独立记录。
-    本接口按 checkin_id 删关联数据 —— 不会跨 cid 误伤 —— 但为防前端错用接口，加 kind 守门：
-      - ?kind=daily   但 ci.entry_type != 'daily'   → 400 拒绝（建议去"作业区"删）
-      - ?kind=homework 但 ci.entry_type != 'homework' → 400 拒绝
-      - 不传 kind → 兼容旧调用，按原行为删关联表（向后兼容）
+    V1.21 起打卡与作业彻底解耦，两者行为完全不同：
+
+      daily（打卡）
+        取消 = **只取消今日完成标记**（status -> 'archived'）。
+        照片 / 错题 / AI 识别结果 / 动作日志 **全部保留**，一个字都不删。
+        老数据里挂在 daily 上的照片与识别也因此永久可查。
+        archived 的打卡不算"今日已打卡"，可以重新打卡（会新建一条干净记录）。
+
+      homework（作业）
+        删除 = 完整清理这一次作业（照片 / 错题 / 识别 / 动作日志）。
+        作业是一次性实体，删除就该连带清理。
+
+    支持 ?kind=daily|homework 守门，防前端调错接口。
     """
     member_id = request.args.get('member_id') or 'dad'
     kind = request.args.get('kind')
@@ -956,10 +968,24 @@ def api_checkin_delete(cid):
             return jsonify({'ok': False, 'error': 'not found'}), 404
         actual_kind = ci['entry_type']
         if kind and kind != actual_kind:
-            advice = ('请去作业区右键删除这条作业' if kind == 'daily' and actual_kind == 'homework'
-                      else '作业上传请用传作业入口，不要从打卡撤销')
+            advice = ('这是作业，请去知识点「作业历史」里删除'
+                      if actual_kind == 'homework'
+                      else '这是每日打卡，请在今日看板上取消')
             return jsonify({'ok': False,
                             'error': f'cid {cid} 是 {actual_kind} 而非 {kind}，{advice}'}), 400
+
+        # ---- 打卡：只取消标记，保留照片 / 错题 / 识别 ----
+        if actual_kind == 'daily':
+            conn.execute(
+                "UPDATE checkins SET status='archived', updated_at=? WHERE id=?",
+                (db.now_str(), cid))
+            log_action(conn, cid, None, member_id, 'undo_checkin',
+                       '取消打卡（照片与识别记录已保留）')
+            conn.commit()
+            return jsonify({'ok': True, 'kind': 'daily',
+                            'archived': True, 'kept': True})
+
+        # ---- 作业：完整删除这一次作业 ----
         photos = conn.execute(
             'SELECT filename FROM photos WHERE checkin_id=?', (cid,)).fetchall()
         for p in photos:
@@ -970,7 +996,7 @@ def api_checkin_delete(cid):
         conn.execute('DELETE FROM review_actions WHERE checkin_id=?', (cid,))
         conn.execute('DELETE FROM checkins WHERE id=?', (cid,))
         conn.commit()
-        return jsonify({'ok': True, 'kind': actual_kind})
+        return jsonify({'ok': True, 'kind': actual_kind, 'archived': False})
     finally:
         conn.close()
 
@@ -1018,6 +1044,11 @@ def api_upload_photos(cid):
         ci = conn.execute('SELECT * FROM checkins WHERE id=?', (cid,)).fetchone()
         if not ci:
             return jsonify({'ok': False, 'error': 'not found'}), 404
+        # V1.21：打卡与作业彻底解耦 —— 照片只能挂在作业上。
+        # 打卡卡片不再提供上传入口，后端也拦截，避免历史调用路径绕过。
+        if ci['entry_type'] == 'daily':
+            return jsonify({'ok': False,
+                            'error': '打卡不再挂照片，请去「传作业」上传'}), 400
         files = request.files.getlist('files')
         saved = []
         for f in files:
@@ -1803,6 +1834,63 @@ def api_knowledge_point(kid):
                          (1 if data['active'] else 0, kid))
         conn.commit()
         return jsonify({'ok': True})
+    finally:
+        conn.close()
+
+
+@app.route('/api/knowledge-point/<int:kid>/homeworks')
+def api_kp_homeworks(kid):
+    """某知识点下的全部作业历史，供知识点全景图的「作业历史」弹层展示。
+
+    按完成日期倒序返回每一次作业，含状态（待识别/待审核/已完成/打回重跑）、
+    照片张数、已确认错题数。同一知识点可反复提交（单元考考几次是常态）。
+    """
+    conn = db.get_conn()
+    try:
+        kp = conn.execute(
+            'SELECT * FROM knowledge_points WHERE id=?', (kid,)).fetchone()
+        if not kp:
+            return jsonify({'ok': False, 'error': 'not found'}), 404
+        board = conn.execute(
+            'SELECT * FROM boards WHERE id=?', (kp['board_id'],)).fetchone()
+
+        # 父级（单元）要带上其下所有子级（课文）的作业
+        kids = [r['id'] for r in conn.execute(
+            'SELECT id FROM knowledge_points WHERE parent_id=?', (kid,)).fetchall()]
+        kp_ids = [kid] + kids
+        placeholders = ','.join('?' * len(kp_ids))
+
+        rows = conn.execute(f'''
+            SELECT c.* FROM checkins c
+            WHERE c.entry_type='homework' AND c.kp_id IN ({placeholders})
+            ORDER BY c.checkin_date DESC, c.id DESC
+        ''', tuple(kp_ids)).fetchall()
+
+        out = []
+        for r in rows:
+            item = row2dict(r)
+            item['photo_count'] = conn.execute(
+                'SELECT COUNT(*) AS c FROM photos WHERE checkin_id=?',
+                (r['id'],)).fetchone()['c']
+            run = conn.execute(
+                'SELECT * FROM ai_runs WHERE checkin_id=? ORDER BY version DESC LIMIT 1',
+                (r['id'],)).fetchone()
+            item['wrong_count'] = conn.execute(
+                "SELECT COUNT(*) AS c FROM wrong_questions WHERE run_id=? "
+                "AND status='confirmed'",
+                (run['id'],)).fetchone()['c'] if run else 0
+            item['pending_count'] = conn.execute(
+                "SELECT COUNT(*) AS c FROM wrong_questions WHERE run_id=? "
+                "AND status='pending'",
+                (run['id'],)).fetchone()['c'] if run else 0
+            out.append(item)
+
+        return jsonify({
+            'ok': True,
+            'kp': row2dict(kp),
+            'board': row2dict(board) if board else None,
+            'homeworks': out,
+        })
     finally:
         conn.close()
 

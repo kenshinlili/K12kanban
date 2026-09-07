@@ -149,6 +149,21 @@
   </div>
 </div>
 
+<!-- 知识点作业历史（从知识点全景图的 chip 点进来）
+     层级 125/126：低于「上传作业」弹窗(130/131)，所以点「上传新作业」能盖在本弹窗之上 -->
+<div class="kphw-modal-mask" id="kpHwMask"></div>
+<div class="kphw-modal" id="kpHwModal">
+  <div class="hw-modal-header">
+    <h3>📚 作业历史</h3>
+    <button class="icon-btn" id="btnCloseKpHw">✕</button>
+  </div>
+  <div class="hw-modal-body" id="kpHwBody"></div>
+  <div class="hw-modal-footer">
+    <button class="btn" id="btnCloseKpHw2">关闭</button>
+    <button class="btn btn-primary" id="btnKpHwUpload">📤 上传新作业</button>
+  </div>
+</div>
+
 <!-- 提示 -->
 <div class="toast" id="toast"></div>
 

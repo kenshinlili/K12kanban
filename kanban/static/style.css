@@ -427,6 +427,11 @@ body {
 .todo-title { font-weight: 700; font-size: 14.5px; margin-bottom: 5px; }
 .todo-meta { font-size: 12.5px; color: var(--text-soft); display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
 
+/* V1.21 打卡 / 作业 类型标识（两者后果不同：取消打卡不删任何东西，删除作业才连带清理） */
+.todo-type { font-size: 11px; padding: 2px 8px; border-radius: 9px; font-weight: 700; }
+.todo-type.hw { background: #e0e7ff; color: #3730a3; }
+.todo-type.daily { background: #f1f5f9; color: #475569; }
+
 /* 错题本 */
 .wb-filter { display: flex; gap: 7px; margin-bottom: 14px; flex-wrap: wrap; }
 .wb-item {
@@ -836,6 +841,44 @@ body {
   padding: 12px 18px; border-top: 1px solid var(--border);
   display: flex; justify-content: flex-end; gap: 10px;
 }
+
+/* ---------- V1.21 知识点作业历史弹层 ----------
+   层级 125/126：低于「上传作业」弹窗(130/131)，所以在里面点「上传新作业」能盖上来 */
+.kphw-modal-mask {
+  position: fixed; inset: 0; background: rgba(15, 23, 42, .5);
+  opacity: 0; pointer-events: none; transition: opacity .2s; z-index: 125;
+}
+.kphw-modal-mask.show { opacity: 1; pointer-events: auto; }
+.kphw-modal {
+  position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%) scale(.96);
+  width: min(560px, 94vw); max-height: 86vh; background: #fff;
+  border-radius: 14px; box-shadow: var(--shadow-lg); z-index: 126;
+  display: flex; flex-direction: column; opacity: 0; pointer-events: none; transition: all .2s;
+}
+.kphw-modal.show { opacity: 1; transform: translate(-50%, -50%) scale(1); pointer-events: auto; }
+
+/* 知识点 chip 上的作业次数徽章 */
+.kp-chip.kp-clickable { cursor: pointer; }
+.kp-chip.kp-clickable:hover { border-color: var(--primary, #2563eb); background: #eff6ff; }
+.kp-hw-badge {
+  display: inline-block; margin-left: 5px; padding: 1px 6px; border-radius: 8px;
+  background: #e0e7ff; color: #3730a3; font-size: 11px; font-weight: 700;
+}
+
+/* 作业历史列表 */
+.kphw-head {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 12px;
+  padding-bottom: 10px; border-bottom: 1px solid var(--border);
+}
+.kphw-count { font-size: 13px; color: var(--text-soft); }
+.kphw-item {
+  display: flex; align-items: center; gap: 10px; padding: 11px 12px;
+  border: 1px solid var(--border); border-radius: 10px; margin-bottom: 8px; background: #fff;
+}
+.kphw-item-main { flex: 1; min-width: 0; }
+.kphw-item-date { font-weight: 700; font-size: 14px; margin-bottom: 4px; }
+.kphw-item-meta { font-size: 12px; color: var(--text-soft); display: flex; gap: 8px; flex-wrap: wrap; }
+.kphw-item-acts { display: flex; gap: 6px; flex-shrink: 0; }
 .field .tip { font-weight: 400; color: #9ca3af; margin-left: 4px; }
 
 /* ---------- 知识点台账：两级单元分组 ---------- */
