@@ -286,6 +286,32 @@ def migrate_db(conn):
     if fixed:
         print(f"[migrate] cleaned pinyin from {fixed} correct_answer rows")
 
+    # 5. V1.24：学而思板块知识点精简，清理旧的「基础知识/阅读理解/作文技法/古诗文」
+    #    只删没有被 checkins 引用的孤立知识点，避免误伤历史作业
+    XES_OBSOLETE = ['基础知识', '阅读理解', '作文技法', '古诗文']
+    XES_KEEP = {n for n in FLAT_KNOWLEDGE.get('cn_xes', [])}
+    obsolete_to_clean = [n for n in XES_OBSOLETE if n not in XES_KEEP]
+    to_remove = []
+    if obsolete_to_clean:
+        placeholders = ','.join('?' * len(obsolete_to_clean))
+        to_remove = conn.execute(
+            f'SELECT id, name FROM knowledge_points WHERE board_id=? AND name IN ({placeholders})',
+            ('cn_xes', *obsolete_to_clean)
+        ).fetchall()
+    removed = 0
+    skipped = 0
+    for row in to_remove:
+        used = conn.execute(
+            'SELECT 1 FROM checkins WHERE kp_id=? LIMIT 1', (row['id'],)
+        ).fetchone()
+        if used:
+            skipped += 1
+            continue
+        conn.execute('DELETE FROM knowledge_points WHERE id=?', (row['id'],))
+        removed += 1
+    if removed or skipped:
+        print(f"[migrate] cn_xes 清理旧知识点：删除 {removed} 个，保留 {skipped} 个（有作业关联）")
+
 
 def _seed_tree(conn, board_id, tree):
     """两级知识点种子：tree = [(单元名, [课文/活动...]), ...]"""
