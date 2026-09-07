@@ -2558,14 +2558,13 @@ async function handleReviewModalAction(act, idx) {
   }
 
   if (act === 'reject') {
-    const comment = prompt('请说明哪里识别错了（会记录并打回给 AI 重跑）：');
-    if (comment === null) return;
+    // 「识别有误」= 家长判定 AI 这题识别错了，直接驳回为 rejected，不触发 AI 重跑。
+    // 如需让 AI 重新识别，请点旁边的「重新识别」按钮。
     await post(`/question/${q.id}/update`, { ...getQuestionFormData(idx), member_id: STATE.member });
-    const r = await post(`/question/${q.id}/review`, { action: 'reject', comment, member_id: STATE.member });
+    const r = await post(`/question/${q.id}/review`, { action: 'reject', member_id: STATE.member });
     if (!r.ok) { toast('驳回失败：' + (r.error || '未知')); return; }
     q.status = 'rejected';
-    q.review_comment = comment;
-    toast('✗ 已驳回');
+    toast('✗ 已驳回（不会触发 AI 重跑）');
     await loadState();
     await loadCheckin(checkin.id);
     renderReviewModal();

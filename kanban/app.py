@@ -1010,6 +1010,10 @@ def api_checkin_delete(cid):
             'SELECT filename FROM photos WHERE checkin_id=?', (cid,)).fetchall()
         for p in photos:
             STORAGE.delete(p['filename'])
+        # 先清掉关联的复习计划，再删错题，避免留下孤立 schedule。
+        conn.execute(
+            'DELETE FROM review_schedules WHERE wrong_question_id IN '
+            '(SELECT id FROM wrong_questions WHERE checkin_id=?)', (cid,))
         conn.execute('DELETE FROM photos WHERE checkin_id=?', (cid,))
         conn.execute('DELETE FROM wrong_questions WHERE checkin_id=?', (cid,))
         conn.execute('DELETE FROM ai_runs WHERE checkin_id=?', (cid,))
@@ -2312,19 +2316,11 @@ def api_review_stats():
     conn = db.get_conn()
     try:
         today = db.today_str()
-        due = conn.execute(
-            "SELECT COUNT(*) AS c FROM review_schedules WHERE status='pending' "
-            "AND next_review_date <= ?", (today,)).fetchone()['c']
-        upcoming = conn.execute(
-            "SELECT COUNT(*) AS c FROM review_schedules WHERE status='pending' "
-            "AND next_review_date > ?", (today,)).fetchone()['c']
-        mastered = conn.execute(
-            "SELECT COUNT(*) AS c FROM review_schedules WHERE status='mastered'").fetchone()['c']
         total_wrong = conn.execute(
             "SELECT COUNT(*) AS c FROM wrong_questions WHERE status='confirmed'").fetchone()['c']
-        per_subject = {}
-        for r in conn.execute('''
-            SELECT b.subject,
+        # 统计必须 JOIN 实体表，避免已删除错题留下孤立的 review_schedules 被计入。
+        agg_sql = '''
+            SELECT
               SUM(CASE WHEN s.status='pending' AND s.next_review_date<=? THEN 1 ELSE 0 END) AS due,
               SUM(CASE WHEN s.status='pending' AND s.next_review_date>? THEN 1 ELSE 0 END) AS upcoming,
               SUM(CASE WHEN s.status='mastered' THEN 1 ELSE 0 END) AS mastered
@@ -2332,10 +2328,16 @@ def api_review_stats():
             JOIN wrong_questions q ON s.wrong_question_id=q.id
             JOIN checkins c ON q.checkin_id=c.id
             JOIN boards b ON c.board_id=b.id
-            GROUP BY b.subject
-        ''', (today, today)).fetchall():
+        '''
+        totals = conn.execute(agg_sql, (today, today)).fetchone()
+        due = totals['due'] or 0
+        upcoming = totals['upcoming'] or 0
+        mastered = totals['mastered'] or 0
+        per_subject = {}
+        for r in conn.execute(agg_sql.replace('SELECT', 'SELECT b.subject,', 1) + ' GROUP BY b.subject',
+                              (today, today)).fetchall():
             per_subject[r['subject']] = {
-                'due': r['due'], 'upcoming': r['upcoming'], 'mastered': r['mastered'],
+                'due': r['due'] or 0, 'upcoming': r['upcoming'] or 0, 'mastered': r['mastered'] or 0,
             }
         return jsonify({
             'ok': True,
