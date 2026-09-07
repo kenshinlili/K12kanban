@@ -1702,8 +1702,8 @@ async function appendBoardHistory(boardId, excludeCid) {
 }
 
 function wrongQuestionCard(q) {
-  const stateCls = q.status === 'confirmed' ? 'confirmed' : q.status === 'rejected' ? 'rejected' : q.status === 'rerun_requested' ? 'rerun' : '';
-  const stateText = q.status === 'confirmed' ? '✓ 已确认' : q.status === 'rejected' ? '✗ 已驳回' : q.status === 'rerun_requested' ? '🔄 待重新识别' : '待审';
+  const stateCls = q.status === 'confirmed' ? 'confirmed' : q.status === 'rerun_requested' ? 'rerun' : '';
+  const stateText = q.status === 'confirmed' ? '✓ 已确认' : q.status === 'rerun_requested' ? '🔄 待重新识别' : '待审';
   const isPending = q.status === 'pending' || q.status === 'rerun_requested';
   return `<div class="wq-card ${stateCls}" data-q="${q.id}">
     <div class="wq-top">
@@ -1721,16 +1721,11 @@ function wrongQuestionCard(q) {
     </div>
     ${isPending ? `<div class="wq-actions">
       <button class="btn btn-success btn-sm" data-qact="confirm" data-qid="${q.id}">✓ 正确</button>
-      <button class="btn btn-danger btn-sm" data-qact="reject" data-qid="${q.id}">✗ 识别有误</button>
+      <button class="btn btn-danger btn-sm" data-qact="delete" data-qid="${q.id}" title="这题不是错题 / 不需要，直接删除">🗑 删除</button>
       <button class="btn btn-sm" data-qact="rerun" data-qid="${q.id}">🔄 重新识别</button>
-    </div>
-    <div id="rejectBox-${q.id}" style="display:none;margin-top:8px">
-      <textarea id="rejectText-${q.id}" placeholder="说明哪里识别错了" style="width:100%;border:1px solid var(--border);border-radius:8px;padding:7px 10px;font-size:13px;min-height:56px;font-family:inherit"></textarea>
-      <button class="btn btn-danger btn-sm" style="margin-top:6px" data-qact="rejectSubmit" data-qid="${q.id}">提交驳回</button>
     </div>` : `<div class="wq-actions" style="margin-top:6px">
       <button class="btn btn-danger btn-sm" data-qact="undoReview" data-qid="${q.id}">↩ 撤回审核</button>
     </div>`}
-    ${q.review_comment ? `<div class="wq-comment">💬 ${esc(q.review_comment)}</div>` : ''}
   </div>`;
 }
 
@@ -1827,15 +1822,10 @@ function bindDrawerEvents() {
           action: 'confirm', member_id: STATE.member,
         });
         toast('已确认');
-      } else if (act === 'reject') {
-        document.getElementById(`rejectBox-${qid}`).style.display = 'block';
-        return;
-      } else if (act === 'rejectSubmit') {
-        const txt = document.getElementById(`rejectText-${qid}`).value.trim();
-        await post(`/question/${qid}/review`, {
-          action: 'reject', comment: txt, member_id: STATE.member,
-        });
-        toast('已驳回');
+      } else if (act === 'delete') {
+        if (!confirm('确定删除这道题？\n删除后不会进入错题本，也不可恢复。')) return;
+        await del(`/question/${qid}/delete?member_id=${STATE.member}`);
+        toast('已删除');
       } else if (act === 'rerun') {
         const txt = prompt('请说明需要重新识别的点（可选）：');
         if (txt === null) return;
@@ -2328,14 +2318,13 @@ function renderReviewModal() {
   const board = CURRENT_BOARD;
   const pending = questions.filter(q => q.status === 'pending' || q.status === 'rerun_requested').length;
   const confirmed = questions.filter(q => q.status === 'confirmed').length;
-  const rejected = questions.filter(q => q.status === 'rejected').length;
   const rerunReq = questions.filter(q => q.status === 'rerun_requested').length;
 
   document.getElementById('reviewModalSubject').textContent = board?.subject || '科目';
   document.getElementById('reviewModalBoard').textContent = board?.name || '板块';
   document.getElementById('reviewModalMeta').textContent =
     `${checkin.checkin_date} · ${checkin.photos.length} 张照片 · ${questions.length} 题 · ` +
-    `已确认 ${confirmed} · 已驳回 ${rejected} · 待重新识别 ${rerunReq} · 待审 ${pending}`;
+    `已确认 ${confirmed} · 待重新识别 ${rerunReq} · 待审 ${pending}`;
 
   // 左侧照片区
   const left = document.getElementById('reviewModalLeft');
@@ -2349,7 +2338,6 @@ function renderReviewModal() {
         <div><span class="ro-label">照片</span><span>${checkin.photos.length} 张</span></div>
         <div><span class="ro-label">总题</span><span>${questions.length} 题</span></div>
         <div><span class="ro-label">已确认</span><span style="color:#16a34a">${confirmed}</span></div>
-        <div><span class="ro-label">已驳回</span><span style="color:var(--danger)">${rejected}</span></div>
         <div><span class="ro-label">待重识别</span><span style="color:var(--warn)">${rerunReq}</span></div>
         <div><span class="ro-label">待审</span><span style="color:var(--primary)">${pending}</span></div>
         ${checkin.kp_name ? `<div class="ro-full"><span class="ro-label">知识点</span><span>${esc(checkin.kp_name)}</span></div>` : ''}
@@ -2376,8 +2364,8 @@ function renderReviewModal() {
   </div>`;
 
   questions.forEach((q, idx) => {
-    const stateCls = q.status === 'confirmed' ? 'confirmed' : q.status === 'rejected' ? 'rejected' : q.status === 'rerun_requested' ? 'rerun' : '';
-    const stateText = q.status === 'confirmed' ? '✓ 已确认' : q.status === 'rejected' ? '✗ 已驳回' : q.status === 'rerun_requested' ? '🔄 待重新识别' : '待审';
+    const stateCls = q.status === 'confirmed' ? 'confirmed' : q.status === 'rerun_requested' ? 'rerun' : '';
+    const stateText = q.status === 'confirmed' ? '✓ 已确认' : q.status === 'rerun_requested' ? '🔄 待重新识别' : '待审';
     const candidates = q.answer_candidates || [];
     html += `<div class="review-question-edit ${stateCls}" data-qidx="${idx}">
       <div class="rqe-header">
@@ -2409,7 +2397,7 @@ function renderReviewModal() {
       <div class="rqe-actions">
         <button class="btn btn-primary" data-ract="save" data-qidx="${idx}" title="只保存你手动改的文字，不改变题的状态（仍是待审）">💾 保存修改</button>
         <button class="btn btn-success" data-ract="confirm" data-qidx="${idx}" title="确认这题是对的（不改 AI 识别结果，或保存你改完的结果），确认后进入错题本并安排复习">✓ 确认错题</button>
-        <button class="btn btn-danger" data-ract="reject" data-qidx="${idx}" title="标记这题识别错误（不会让 AI 重跑，由你自己手动改题）。适合「AI 识别错了但我不想再花积分调 AI」">✗ 识别有误</button>
+        <button class="btn btn-danger" data-ract="delete" data-qidx="${idx}" title="这题不是错题 / 不需要，直接删除（不可恢复）">🗑 删除</button>
         <button class="btn btn-sm" data-ract="rerun" data-qidx="${idx}" title="让 AI 重新看照片识别这题（会进入待重识别队列，等外部 AI 回填）。单题漏识别用这个，整批漏题请用顶部「🔄 全部重新识别」">🔄 重新识别</button>
         <button class="btn btn-sm" data-ract="blank" data-qidx="${idx}" title="OCR 输出常带括号答案（如「潮来时的情景」），此按钮一键把答案与学生作答处替换为 ______，方便打印给孩子重做。手动改具体文字请直接编辑「题目原文」框">⬜ 一键整理为印刷体</button>
         <button class="btn btn-sm undo-blank-btn" data-ract="undoBlank" data-qidx="${idx}" style="display:none" title="撤销刚才的一键整理（同 Ctrl+Z）">↩ 撤销整理</button>
@@ -2557,16 +2545,17 @@ async function handleReviewModalAction(act, idx) {
     return;
   }
 
-  if (act === 'reject') {
-    // 「识别有误」= 家长判定 AI 这题识别错了，直接驳回为 rejected，不触发 AI 重跑。
-    // 如需让 AI 重新识别，请点旁边的「重新识别」按钮。
-    await post(`/question/${q.id}/update`, { ...getQuestionFormData(idx), member_id: STATE.member });
-    const r = await post(`/question/${q.id}/review`, { action: 'reject', member_id: STATE.member });
-    if (!r.ok) { toast('驳回失败：' + (r.error || '未知')); return; }
-    q.status = 'rejected';
-    toast('✗ 已驳回（不会触发 AI 重跑）');
+  if (act === 'delete') {
+    // V1.28：识别结果只有两种归宿——确认入库，或删除丢弃。
+    if (!confirm('确定删除这道题？\n删除后不会进入错题本，也不可恢复。')) return;
+    const r = await del(`/question/${q.id}/delete?member_id=${STATE.member}`);
+    if (!r.ok) { toast('删除失败：' + (r.error || '未知')); return; }
+    toast('🗑 已删除');
     await loadState();
     await loadCheckin(checkin.id);
+    // 刷新弹窗数据：被删的题已从 questions 中消失
+    REVIEW_MODAL_DATA.checkin = await loadCheckin(checkin.id);
+    REVIEW_MODAL_DATA.questions = REVIEW_MODAL_DATA.checkin.runs?.[0]?.questions || [];
     renderReviewModal();
     renderDrawer();
     return;

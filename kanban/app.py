@@ -1493,6 +1493,30 @@ def api_transfer(cid):
         conn.close()
 
 
+@app.route('/api/question/<int:qid>/delete', methods=['DELETE'])
+def api_delete_question(qid):
+    """删除单道错题（家长判定这题不需要 / 识别错了，直接删掉）。
+
+    V1.28：把原来的「识别有误 → rejected」改为「删除」，
+    避免留下无意义的中间状态。删除会级联清理关联复习计划。
+    """
+    member = request.args.get('member_id') or 'dad'
+    conn = db.get_conn()
+    try:
+        q = conn.execute('SELECT * FROM wrong_questions WHERE id=?', (qid,)).fetchone()
+        if not q:
+            return jsonify({'ok': False, 'error': 'not found'}), 404
+        # 级联删复习计划，避免孤立 schedule
+        conn.execute('DELETE FROM review_schedules WHERE wrong_question_id=?', (qid,))
+        conn.execute('DELETE FROM wrong_questions WHERE id=?', (qid,))
+        log_action(conn, q['checkin_id'], q['run_id'], member,
+                   'question_delete', f'删除错题 #{qid}')
+        conn.commit()
+        return jsonify({'ok': True, 'deleted': True})
+    finally:
+        conn.close()
+
+
 @app.route('/api/question/<int:qid>/undo-review', methods=['POST'])
 def api_question_undo_review(qid):
     """错题审核撤销：把 confirmed/rejected 退回 pending；如果是 finalize 后撤回到 pending_review"""
