@@ -1350,6 +1350,35 @@ def api_update_question(qid):
         conn.close()
 
 
+def _auto_finalize_checkin(conn, cid, member='system'):
+    """当某次作业的所有错题都被处理完（没有 pending / rerun_requested）时，自动完成审核并入库。"""
+    ci = conn.execute('SELECT * FROM checkins WHERE id=?', (cid,)).fetchone()
+    if not ci or ci['status'] not in ('pending_review',):
+        return False, 'checkin 不存在或不在审核中'
+    run = conn.execute(
+        'SELECT * FROM ai_runs WHERE checkin_id=? ORDER BY version DESC LIMIT 1',
+        (cid,)).fetchone()
+    if not run:
+        return False, '没有识别记录'
+    pending = conn.execute(
+        "SELECT COUNT(*) AS c FROM wrong_questions WHERE run_id=? AND status IN ('pending','rerun_requested')",
+        (run['id'],)).fetchone()['c']
+    if pending > 0:
+        return False, '还有未处理错题'
+    conn.execute('UPDATE checkins SET status=?, updated_at=? WHERE id=?',
+                 ('confirmed', db.now_str(), cid))
+    board = conn.execute(
+        'SELECT b.* FROM boards b JOIN checkins c ON c.board_id=b.id WHERE c.id=?',
+        (cid,)).fetchone()
+    for q in conn.execute(
+            "SELECT id FROM wrong_questions WHERE run_id=? AND status='confirmed'",
+            (run['id'],)).fetchall():
+        schedule_initial_review(conn, q['id'], board['subject'])
+    log_action(conn, cid, run['id'], member,
+               'finalize', '全部错题已处理，自动完成审核并入库')
+    return True, '已自动完成审核'
+
+
 @app.route('/api/question/<int:qid>/review', methods=['POST'])
 def api_review_question(qid):
     """审核单条错题：confirm / reject"""
@@ -1368,6 +1397,8 @@ def api_review_question(qid):
             "WHERE id=?", (status, comment, reviewer, db.now_str(), qid))
         log_action(conn, q['checkin_id'], q['run_id'], reviewer,
                    f'question_{action}', comment)
+        # 若这是最后一题，自动完成审核
+        _auto_finalize_checkin(conn, q['checkin_id'], reviewer)
         conn.commit()
         return jsonify({'ok': True, 'status': status})
     finally:
@@ -1506,11 +1537,14 @@ def api_delete_question(qid):
         q = conn.execute('SELECT * FROM wrong_questions WHERE id=?', (qid,)).fetchone()
         if not q:
             return jsonify({'ok': False, 'error': 'not found'}), 404
+        cid = q['checkin_id']
         # 级联删复习计划，避免孤立 schedule
         conn.execute('DELETE FROM review_schedules WHERE wrong_question_id=?', (qid,))
         conn.execute('DELETE FROM wrong_questions WHERE id=?', (qid,))
-        log_action(conn, q['checkin_id'], q['run_id'], member,
+        log_action(conn, cid, q['run_id'], member,
                    'question_delete', f'删除错题 #{qid}')
+        # 若这是最后一题，自动完成审核
+        _auto_finalize_checkin(conn, cid, member)
         conn.commit()
         return jsonify({'ok': True, 'deleted': True})
     finally:

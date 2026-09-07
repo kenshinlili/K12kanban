@@ -71,6 +71,28 @@ async function loadBoardHistory(boardId) {
   return d.ok ? d.items : [];
 }
 
+/* 当一次作业的所有错题都被确认/删除/请求重跑后，自动完成审核并入库。
+ * 返回 true 表示已自动完成；调用方应在成功后刷新主界面。 */
+async function maybeAutoFinalize(checkin, { silent = false, source = '' } = {}) {
+  if (!checkin || !checkin.runs || !checkin.runs.length) return false;
+  const run = checkin.runs[0];
+  const questions = run.questions || [];
+  const pending = questions.filter(q => q.status === 'pending' || q.status === 'rerun_requested').length;
+  if (pending > 0) return false;
+  // 后端已经自动完成时，不再重复调用 finalize，避免产生冗余的 review_actions。
+  if (checkin.status === 'confirmed') {
+    if (!silent) toast('✓ 全部错题已处理，已自动入库');
+    return true;
+  }
+  const r = await post(`/checkin/${checkin.id}/finalize`, { member_id: STATE.member });
+  if (!r.ok) {
+    if (!silent) toast('自动完成审核失败：' + (r.error || '未知'));
+    return false;
+  }
+  if (!silent) toast('✓ 全部错题已处理，已自动入库');
+  return true;
+}
+
 /* ---------- 渲染 ---------- */
 function render() {
   if (!STATE.data) return;
@@ -1837,7 +1859,14 @@ function bindDrawerEvents() {
       }
       await loadState();
       await loadCheckin(ci.id);
-      renderDrawer();
+      const finalized = await maybeAutoFinalize(CURRENT_CHECKIN, { source: 'drawer' });
+      if (finalized) {
+        await loadState();
+        closeDrawer();
+        render();
+      } else {
+        renderDrawer();
+      }
     };
   });
 
@@ -2540,8 +2569,19 @@ async function handleReviewModalAction(act, idx) {
     toast('✓ 已确认');
     await loadState();
     await loadCheckin(checkin.id);
-    renderReviewModal();
-    renderDrawer();
+    const finalized = await maybeAutoFinalize(CURRENT_CHECKIN, { source: 'review-modal' });
+    if (finalized) {
+      REVIEW_MODAL_DATA.checkin = CURRENT_CHECKIN;
+      REVIEW_MODAL_DATA.questions = CURRENT_CHECKIN.runs?.[0]?.questions || [];
+      closeReviewModal();
+      closeDrawer();
+      render();
+    } else {
+      REVIEW_MODAL_DATA.checkin = CURRENT_CHECKIN;
+      REVIEW_MODAL_DATA.questions = CURRENT_CHECKIN.runs?.[0]?.questions || [];
+      renderReviewModal();
+      renderDrawer();
+    }
     return;
   }
 
@@ -2553,11 +2593,20 @@ async function handleReviewModalAction(act, idx) {
     toast('🗑 已删除');
     await loadState();
     await loadCheckin(checkin.id);
-    // 刷新弹窗数据：被删的题已从 questions 中消失
-    REVIEW_MODAL_DATA.checkin = await loadCheckin(checkin.id);
-    REVIEW_MODAL_DATA.questions = REVIEW_MODAL_DATA.checkin.runs?.[0]?.questions || [];
-    renderReviewModal();
-    renderDrawer();
+    const finalized = await maybeAutoFinalize(CURRENT_CHECKIN, { source: 'review-modal' });
+    if (finalized) {
+      REVIEW_MODAL_DATA.checkin = CURRENT_CHECKIN;
+      REVIEW_MODAL_DATA.questions = CURRENT_CHECKIN.runs?.[0]?.questions || [];
+      closeReviewModal();
+      closeDrawer();
+      render();
+    } else {
+      // 刷新弹窗数据：被删的题已从 questions 中消失
+      REVIEW_MODAL_DATA.checkin = CURRENT_CHECKIN;
+      REVIEW_MODAL_DATA.questions = CURRENT_CHECKIN.runs?.[0]?.questions || [];
+      renderReviewModal();
+      renderDrawer();
+    }
     return;
   }
 
