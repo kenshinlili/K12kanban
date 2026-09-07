@@ -28,6 +28,9 @@ instance/
 .backup_tmp/
 .workbuddy/
 
+# 本地跑测试时 Flask 默认落库的目录（kanban/data/kanban.db），运行时数据不进版本控制
+kanban/data/
+
 # OS
 .DS_Store
 Thumbs.db
