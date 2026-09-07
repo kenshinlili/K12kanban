@@ -34,7 +34,17 @@ CREATE TABLE IF NOT EXISTS knowledge_points (
   name TEXT NOT NULL,
   parent_id INTEGER,
   sort_order INTEGER DEFAULT 0,
-  active INTEGER DEFAULT 1
+  active INTEGER DEFAULT 1,
+  source TEXT DEFAULT 'manual',      -- 'seeded' = 系统默认值，'manual' = 用户手动新增/修改
+  seed_key TEXT                      -- 系统种子的唯一标识（board_id:...），用户手动新增为 NULL
+);
+
+-- 已下发过的默认知识点：保证用户手动删除后不会被再次自动恢复
+CREATE TABLE IF NOT EXISTS seeded_knowledge_points (
+  board_id TEXT NOT NULL,
+  seed_key TEXT NOT NULL,
+  seeded_at TEXT,
+  PRIMARY KEY (board_id, seed_key)
 );
 
 -- 打卡 / 活动记录：entry_type = daily(每日打卡) | homework(作业，可滞后补交)
@@ -286,65 +296,175 @@ def migrate_db(conn):
     if fixed:
         print(f"[migrate] cleaned pinyin from {fixed} correct_answer rows")
 
-    # 5. V1.24：学而思板块知识点精简，清理旧的「基础知识/阅读理解/作文技法/古诗文」
-    #    只删没有被 checkins 引用的孤立知识点，避免误伤历史作业
-    XES_OBSOLETE = ['基础知识', '阅读理解', '作文技法', '古诗文']
-    XES_KEEP = {n for n in FLAT_KNOWLEDGE.get('cn_xes', [])}
-    obsolete_to_clean = [n for n in XES_OBSOLETE if n not in XES_KEEP]
-    to_remove = []
-    if obsolete_to_clean:
-        placeholders = ','.join('?' * len(obsolete_to_clean))
-        to_remove = conn.execute(
-            f'SELECT id, name FROM knowledge_points WHERE board_id=? AND name IN ({placeholders})',
-            ('cn_xes', *obsolete_to_clean)
-        ).fetchall()
-    removed = 0
-    skipped = 0
-    for row in to_remove:
-        used = conn.execute(
-            'SELECT 1 FROM checkins WHERE kp_id=? LIMIT 1', (row['id'],)
-        ).fetchone()
-        if used:
-            skipped += 1
+    # 5. V1.25：知识点种子改为「只补缺失、不恢复手动删除」。
+    #    新增 source/seed_key 字段和 seeded_knowledge_points 表，用于区分系统默认值
+    #    与用户手动调整；用户手动删除/新增的知识点都不会被自动恢复或清空。
+    kp_cols = [r['name'] for r in conn.execute('PRAGMA table_info(knowledge_points)').fetchall()]
+    if 'source' not in kp_cols:
+        conn.execute("ALTER TABLE knowledge_points ADD COLUMN source TEXT DEFAULT 'manual'")
+    if 'seed_key' not in kp_cols:
+        conn.execute('ALTER TABLE knowledge_points ADD COLUMN seed_key TEXT')
+
+    # 确保 seeded_knowledge_points 表存在（老库可能没建）
+    conn.execute('''CREATE TABLE IF NOT EXISTS seeded_knowledge_points (
+      board_id TEXT NOT NULL,
+      seed_key TEXT NOT NULL,
+      seeded_at TEXT,
+      PRIMARY KEY (board_id, seed_key)
+    )''')
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_kp_seed ON knowledge_points(seed_key)')
+
+    # 一次性回填：把当前数据库里还存在的默认知识点标记为 source='seeded' 并登记。
+    # 用户已经手动删除的默认项不再重建——因为 seeded_knowledge_points 里没有记录，
+    # 后续 init_db 也不会再插入它们。
+    _backfill_seeded_knowledge(conn)
+
+
+def _is_seeded(conn, board_id, seed_key):
+    """检查某个默认值是否已经被下发过（即使后来用户删了，也视为已下发，不再重建）。"""
+    return conn.execute(
+        'SELECT 1 FROM seeded_knowledge_points WHERE board_id=? AND seed_key=?',
+        (board_id, seed_key)).fetchone() is not None
+
+
+def _mark_seeded(conn, board_id, seed_key):
+    conn.execute(
+        'INSERT OR IGNORE INTO seeded_knowledge_points (board_id, seed_key, seeded_at) '
+        'VALUES (?, ?, ?)', (board_id, seed_key, now_str()))
+
+
+def _backfill_seeded_knowledge(conn):
+    """一次性回填：把当前数据库里还存在的系统默认值标记为 source='seeded'，
+    并登记到 seeded_knowledge_points，防止后续被重新恢复。
+    只在 seeded_knowledge_points 为空且 knowledge_points 已有数据时执行。"""
+    seeded_count = conn.execute('SELECT COUNT(*) AS n FROM seeded_knowledge_points').fetchone()['n']
+    kp_count = conn.execute('SELECT COUNT(*) AS n FROM knowledge_points').fetchone()['n']
+    if seeded_count > 0 or kp_count == 0:
+        return
+
+    # 两级板块（语文校内）
+    for board_id, tree in TREE_KNOWLEDGE.items():
+        for unit, items in tree:
+            unit_key = f"{board_id}:{unit}"
+            row = conn.execute(
+                'SELECT id FROM knowledge_points WHERE board_id=? AND name=? AND parent_id IS NULL',
+                (board_id, unit)).fetchone()
+            if row:
+                conn.execute(
+                    "UPDATE knowledge_points SET source='seeded', seed_key=? WHERE id=?",
+                    (unit_key, row['id']))
+                _mark_seeded(conn, board_id, unit_key)
+            for item in items:
+                item_key = f"{board_id}:{unit}:{item}"
+                r2 = conn.execute(
+                    'SELECT id FROM knowledge_points WHERE board_id=? AND name=? AND parent_id=?',
+                    (board_id, item, row['id'] if row else None)).fetchone()
+                if r2:
+                    conn.execute(
+                        "UPDATE knowledge_points SET source='seeded', seed_key=? WHERE id=?",
+                        (item_key, r2['id']))
+                    _mark_seeded(conn, board_id, item_key)
+
+    # 扁平板块
+    for board_id, points in FLAT_KNOWLEDGE.items():
+        for name in points:
+            key = f"{board_id}:{name}"
+            row = conn.execute(
+                'SELECT id FROM knowledge_points WHERE board_id=? AND name=? AND parent_id IS NULL',
+                (board_id, name)).fetchone()
+            if row:
+                conn.execute(
+                    "UPDATE knowledge_points SET source='seeded', seed_key=? WHERE id=?",
+                    (key, row['id']))
+                _mark_seeded(conn, board_id, key)
+
+    # 考试和测验板块：按语文现有单元补的单元级默认项
+    EXAM_NAME = '考试和测验'
+    unit_rows = conn.execute(
+        "SELECT kp.id, kp.name FROM knowledge_points kp "
+        "JOIN boards b ON b.id = kp.board_id "
+        "WHERE b.subject='语文' AND kp.parent_id IS NULL "
+        "  AND b.track_mode='单元' AND b.id!='cn_exam' "
+        "ORDER BY kp.sort_order, kp.id").fetchall()
+    seen = set()
+    for r in unit_rows:
+        if r['name'] in seen:
             continue
-        conn.execute('DELETE FROM knowledge_points WHERE id=?', (row['id'],))
-        removed += 1
-    if removed or skipped:
-        print(f"[migrate] cn_xes 清理旧知识点：删除 {removed} 个，保留 {skipped} 个（有作业关联）")
+        seen.add(r['name'])
+        unit_key = f"cn_exam:{r['name']}"
+        exam_unit = conn.execute(
+            'SELECT id FROM knowledge_points WHERE board_id=? AND name=? AND parent_id IS NULL',
+            ('cn_exam', r['name'])).fetchone()
+        if exam_unit:
+            conn.execute(
+                "UPDATE knowledge_points SET source='seeded', seed_key=? WHERE id=?",
+                (unit_key, exam_unit['id']))
+            _mark_seeded(conn, 'cn_exam', unit_key)
+        child = conn.execute(
+            'SELECT id FROM knowledge_points WHERE board_id=? AND name=? AND parent_id=?',
+            ('cn_exam', EXAM_NAME, exam_unit['id'] if exam_unit else None)).fetchone()
+        if child:
+            child_key = f"cn_exam:{r['name']}:{EXAM_NAME}"
+            conn.execute(
+                "UPDATE knowledge_points SET source='seeded', seed_key=? WHERE id=?",
+                (child_key, child['id']))
+            _mark_seeded(conn, 'cn_exam', child_key)
 
 
 def _seed_tree(conn, board_id, tree):
-    """两级知识点种子：tree = [(单元名, [课文/活动...]), ...]"""
+    """两级知识点种子：tree = [(单元名, [课文/活动...]), ...]
+    使用 seeded_knowledge_points 保证默认值只补一次，用户手动删除后不再恢复。"""
     for ui, (unit, items) in enumerate(tree, 1):
-        unit_row = conn.execute(
-            'SELECT id FROM knowledge_points WHERE board_id=? AND name=? AND parent_id IS NULL',
-            (board_id, unit)).fetchone()
-        if unit_row:
-            unit_id = unit_row['id']
+        unit_key = f"{board_id}:{unit}"
+        if _is_seeded(conn, board_id, unit_key):
+            unit_row = conn.execute(
+                'SELECT id FROM knowledge_points WHERE seed_key=?',
+                (unit_key,)).fetchone()
+            unit_id = unit_row['id'] if unit_row else None
         else:
-            cur = conn.execute(
-                'INSERT INTO knowledge_points (board_id, name, parent_id, sort_order) '
-                'VALUES (?,?,?,?)', (board_id, unit, None, ui))
-            unit_id = cur.lastrowid
+            unit_id = conn.execute(
+                'SELECT id FROM knowledge_points WHERE board_id=? AND name=? AND parent_id IS NULL',
+                (board_id, unit)).fetchone()
+            if unit_id:
+                unit_id = unit_id['id']
+            else:
+                cur = conn.execute(
+                    'INSERT INTO knowledge_points (board_id, name, parent_id, sort_order, source, seed_key) '
+                    'VALUES (?,?,?,?,?,?)', (board_id, unit, None, ui, 'seeded', unit_key))
+                unit_id = cur.lastrowid
+            _mark_seeded(conn, board_id, unit_key)
+
+        if unit_id is None:
+            continue
+
         for ii, item in enumerate(items, 1):
+            item_key = f"{board_id}:{unit}:{item}"
+            if _is_seeded(conn, board_id, item_key):
+                continue
             exists = conn.execute(
                 'SELECT 1 FROM knowledge_points WHERE board_id=? AND name=? AND parent_id=?',
                 (board_id, item, unit_id)).fetchone()
             if not exists:
                 conn.execute(
-                    'INSERT INTO knowledge_points (board_id, name, parent_id, sort_order) '
-                    'VALUES (?,?,?,?)', (board_id, item, unit_id, ii))
+                    'INSERT INTO knowledge_points (board_id, name, parent_id, sort_order, source, seed_key) '
+                    'VALUES (?,?,?,?,?,?)', (board_id, item, unit_id, ii, 'seeded', item_key))
+            _mark_seeded(conn, board_id, item_key)
 
 
 def _seed_flat(conn, board_id, points):
+    """扁平板块默认值种子，用户手动删除后不再恢复。"""
     for i, name in enumerate(points, 1):
+        key = f"{board_id}:{name}"
+        if _is_seeded(conn, board_id, key):
+            continue
         exists = conn.execute(
             'SELECT 1 FROM knowledge_points WHERE board_id=? AND name=? AND parent_id IS NULL',
             (board_id, name)).fetchone()
         if not exists:
             conn.execute(
-                'INSERT INTO knowledge_points (board_id, name, parent_id, sort_order) '
-                'VALUES (?,?,?,?)', (board_id, name, None, i))
+                'INSERT INTO knowledge_points (board_id, name, parent_id, sort_order, source, seed_key) '
+                'VALUES (?,?,?,?,?,?)', (board_id, name, None, i, 'seeded', key))
+        _mark_seeded(conn, board_id, key)
 
 
 def init_db():
@@ -397,11 +517,13 @@ def ensure_exam_knowledge(conn):
     # 确保考试板块标记为「无需打卡」
     conn.execute("UPDATE boards SET no_checkin=1 WHERE id='cn_exam'")
 
-    # 语文所有板块下的一级知识点（单元）按名字去重，作为建考试项的基准
+    # 语文「单元制」板块下的一级知识点（单元）按名字去重，作为建考试项的基准。
+    # 只取 track_mode='单元' 且不是考试板块本身，避免把扁平板块的顶层知识点也当成单元。
     rows = conn.execute(
         "SELECT kp.id, kp.name FROM knowledge_points kp "
         "JOIN boards b ON b.id = kp.board_id "
         "WHERE b.subject='语文' AND kp.parent_id IS NULL "
+        "  AND b.track_mode='单元' AND b.id!='cn_exam' "
         "ORDER BY kp.sort_order, kp.id").fetchall()
     unit_names = []
     for r in rows:
@@ -409,16 +531,32 @@ def ensure_exam_knowledge(conn):
             unit_names.append(r['name'])
 
     for unit_name in unit_names:
-        row = conn.execute(
-            'SELECT id FROM knowledge_points '
-            'WHERE board_id=? AND name=? AND parent_id IS NULL',
-            ('cn_exam', unit_name)).fetchone()
-        if row:
-            pid = row['id']
+        unit_key = f"cn_exam:{unit_name}"
+        seeded = _is_seeded(conn, 'cn_exam', unit_key)
+        if seeded:
+            row = conn.execute(
+                'SELECT id FROM knowledge_points WHERE seed_key=?', (unit_key,)).fetchone()
+            pid = row['id'] if row else None
         else:
-            pid = conn.execute(
-                'INSERT INTO knowledge_points (board_id, name, parent_id, sort_order) '
-                'VALUES (?, ?, NULL, 0)', ('cn_exam', unit_name)).lastrowid
+            row = conn.execute(
+                'SELECT id FROM knowledge_points '
+                'WHERE board_id=? AND name=? AND parent_id IS NULL',
+                ('cn_exam', unit_name)).fetchone()
+            if row:
+                pid = row['id']
+            else:
+                pid = conn.execute(
+                    'INSERT INTO knowledge_points (board_id, name, parent_id, sort_order, source, seed_key) '
+                    'VALUES (?, ?, NULL, 0, ?, ?)',
+                    ('cn_exam', unit_name, 'seeded', unit_key)).lastrowid
+            _mark_seeded(conn, 'cn_exam', unit_key)
+
+        if pid is None:
+            continue
+
+        child_key = f"cn_exam:{unit_name}:{EXAM_NAME}"
+        if _is_seeded(conn, 'cn_exam', child_key):
+            continue
         exists = conn.execute(
             'SELECT id FROM knowledge_points '
             'WHERE board_id=? AND parent_id=? AND name=?',
@@ -426,8 +564,10 @@ def ensure_exam_knowledge(conn):
         if not exists:
             # sort_order=99 保证排在同单元其他课文之后
             conn.execute(
-                'INSERT INTO knowledge_points (board_id, name, parent_id, sort_order) '
-                'VALUES (?, ?, ?, 99)', ('cn_exam', EXAM_NAME, pid))
+                'INSERT INTO knowledge_points (board_id, name, parent_id, sort_order, source, seed_key) '
+                'VALUES (?, ?, ?, 99, ?, ?)',
+                ('cn_exam', EXAM_NAME, pid, 'seeded', child_key))
+        _mark_seeded(conn, 'cn_exam', child_key)
 
 
 def now_str():

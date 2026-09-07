@@ -675,6 +675,8 @@ body {
 .rqe-actions .btn-primary { background: var(--success); border-color: var(--success); }
 .rqe-actions .btn-primary:hover { opacity: .9; }
 .rqe-actions .btn-danger { color: var(--danger); border-color: #fecaca; }
+.rqe-actions .undo-blank-btn { color: #b45309; border-color: #fde68a; background: #fffbeb; }
+.rqe-actions .undo-blank-btn:hover { background: #fef3c7; }
 .rqe-print-hint {
   background: var(--primary-soft); color: var(--primary); border-radius: 8px;
   padding: 9px 12px; font-size: 12px; margin-bottom: 12px; line-height: 1.6;

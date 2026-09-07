@@ -2088,6 +2088,9 @@ document.addEventListener('DOMContentLoaded', () => {
 /* ---------- 左右分屏错题审核弹窗 ---------- */
 let REVIEW_MODAL_DATA = null; // { checkin, questions }
 const RQE_UNDO = new Map();   // idx -> UndoManager
+let REVIEW_MODAL_UNDO = [];   // 一键整理撤销栈：{ idx, before: {}, after: {} }
+let REVIEW_MODAL_REDO = [];   // 一键整理重做栈
+let REVIEW_MODAL_LAST_IDX = null; // 最近一次被一键整理的题目索引
 
 class UndoManager {
   constructor(el, max = 50) {
@@ -2135,12 +2138,16 @@ function openReviewModal(ci) {
   try {
     REVIEW_MODAL_DATA = { checkin: ci, questions: JSON.parse(JSON.stringify((ci.runs || [])[0]?.questions || [])) };
     RQE_UNDO.clear();
+    REVIEW_MODAL_UNDO = [];
+    REVIEW_MODAL_REDO = [];
+    REVIEW_MODAL_LAST_IDX = null;
     renderReviewModal();
     // 关掉抽屉遮罩避免挡住 review-modal（drawer 本身保留，关闭 reviewModal 时无需恢复）
     const drawerMask = document.getElementById('drawerMask');
     if (drawerMask) drawerMask.style.pointerEvents = 'none';
     document.getElementById('reviewModalMask').classList.add('show');
     document.getElementById('reviewModal').classList.add('show');
+    document.addEventListener('keydown', reviewModalKeyHandler);
   } catch (e) {
     console.error('[review-modal] open failed:', e);
     toast('打开分屏审核失败：' + (e.message || e));
@@ -2155,6 +2162,98 @@ function closeReviewModal() {
   if (drawerMask) drawerMask.style.pointerEvents = '';
   REVIEW_MODAL_DATA = null;
   RQE_UNDO.clear();
+  REVIEW_MODAL_UNDO = [];
+  REVIEW_MODAL_REDO = [];
+  REVIEW_MODAL_LAST_IDX = null;
+  document.removeEventListener('keydown', reviewModalKeyHandler);
+}
+
+function reviewModalKeyHandler(e) {
+  // 只在审核弹窗打开时生效
+  if (!REVIEW_MODAL_DATA) return;
+
+  const key = e.key.toLowerCase();
+  const ctrl = e.ctrlKey || e.metaKey;
+
+  // 当焦点在输入框/textarea 里时，让输入框自己的 Ctrl+Z 处理文字级撤销；
+  // 只有焦点不在输入框时，才用全局撤销响应「一键整理」。
+  const inInput = e.target && (e.target.tagName === 'TEXTAREA' || e.target.tagName === 'INPUT');
+
+  if (ctrl && key === 'z' && !e.shiftKey) {
+    if (!inInput) {
+      e.preventDefault();
+      undoReviewModalBlank();
+    }
+  } else if ((ctrl && key === 'y') || (ctrl && key === 'z' && e.shiftKey)) {
+    if (!inInput) {
+      e.preventDefault();
+      redoReviewModalBlank();
+    }
+  }
+}
+
+function snapshotQuestion(idx) {
+  return {
+    content: document.getElementById(`rqe-content-${idx}`)?.value ?? '',
+    student_answer: document.getElementById(`rqe-stu-${idx}`)?.value ?? '',
+    correct_answer: document.getElementById(`rqe-ans-${idx}`)?.value ?? '',
+    error_type: document.getElementById(`rqe-type-${idx}`)?.value ?? '',
+    knowledge_point: document.getElementById(`rqe-kp-${idx}`)?.value ?? '',
+  };
+}
+
+function applyQuestionSnapshot(idx, snap) {
+  const contentEl = document.getElementById(`rqe-content-${idx}`);
+  if (contentEl) contentEl.value = snap.content || '';
+  const stuEl = document.getElementById(`rqe-stu-${idx}`);
+  if (stuEl) stuEl.value = snap.student_answer || '';
+  const ansEl = document.getElementById(`rqe-ans-${idx}`);
+  if (ansEl) ansEl.value = snap.correct_answer || '';
+  const typeEl = document.getElementById(`rqe-type-${idx}`);
+  if (typeEl) typeEl.value = snap.error_type || '';
+  const kpEl = document.getElementById(`rqe-kp-${idx}`);
+  if (kpEl) kpEl.value = snap.knowledge_point || '';
+  // 同时更新 UndoManager 的栈顶，避免 textarea 自己的撤销栈脱节
+  RQE_UNDO.get(`${idx}-content`)?.save(true);
+  RQE_UNDO.get(`${idx}-stu`)?.save(true);
+  RQE_UNDO.get(`${idx}-ans`)?.save(true);
+}
+
+function updateUndoBlankButtons() {
+  // 每道题的「撤销整理」按钮只在存在可撤销记录时显示
+  document.querySelectorAll('.undo-blank-btn').forEach(btn => {
+    const idx = parseInt(btn.dataset.qidx);
+    const has = REVIEW_MODAL_UNDO.some(u => u.idx === idx);
+    btn.style.display = has ? '' : 'none';
+  });
+}
+
+function undoReviewModalBlank() {
+  if (!REVIEW_MODAL_UNDO.length) {
+    toast('没有可撤销的整理操作');
+    return;
+  }
+  const record = REVIEW_MODAL_UNDO.pop();
+  // 当前状态进重做栈
+  REVIEW_MODAL_REDO.push({ idx: record.idx, before: snapshotQuestion(record.idx) });
+  applyQuestionSnapshot(record.idx, record.before);
+  REVIEW_MODAL_LAST_IDX = record.idx;
+  updateUndoBlankButtons();
+  toast('↩ 已撤销一键整理');
+}
+
+function redoReviewModalBlank() {
+  if (!REVIEW_MODAL_REDO.length) {
+    toast('没有可重做操作');
+    return;
+  }
+  const record = REVIEW_MODAL_REDO.pop();
+  // 当前状态进撤销栈
+  REVIEW_MODAL_UNDO.push({ idx: record.idx, before: snapshotQuestion(record.idx) });
+  applyQuestionSnapshot(record.idx, record.before);
+  REVIEW_MODAL_LAST_IDX = record.idx;
+  updateUndoBlankButtons();
+  toast('↪ 已重做');
 }
 
 function renderReviewModal() {
@@ -2218,7 +2317,7 @@ function renderReviewModal() {
         <div><span class="rqe-num">${idx + 1}</span> <span class="rqe-status">${stateText}</span></div>
       </div>
       <div class="rqe-field">
-        <label>题目原文（必须从照片中原样提取印刷体，不要改写）<span class="tip">可编辑 · Ctrl+Z 撤销</span></label>
+        <label>题目原文（必须从照片中原样提取印刷体，不要改写）<span class="tip">可编辑 · 一键整理后可按 Ctrl+Z 撤销</span></label>
         <textarea id="rqe-content-${idx}">${esc(q.content)}</textarea>
       </div>
       <div class="rqe-field rqe-optional">
@@ -2246,6 +2345,7 @@ function renderReviewModal() {
         <button class="btn btn-danger" data-ract="reject" data-qidx="${idx}" title="标记这题识别错误（不会让 AI 重跑，由你自己手动改题）。适合「AI 识别错了但我不想再花积分调 AI」">✗ 识别有误</button>
         <button class="btn btn-sm" data-ract="rerun" data-qidx="${idx}" title="让 AI 重新看照片识别这题（会进入待重识别队列，等外部 AI 回填）。单题漏识别用这个，整批漏题请用顶部「🔄 全部重新识别」">🔄 重新识别</button>
         <button class="btn btn-sm" data-ract="blank" data-qidx="${idx}" title="OCR 输出常带括号答案（如「潮来时的情景」），此按钮一键把答案与学生作答处替换为 ______，方便打印给孩子重做。手动改具体文字请直接编辑「题目原文」框">⬜ 一键整理为印刷体</button>
+        <button class="btn btn-sm undo-blank-btn" data-ract="undoBlank" data-qidx="${idx}" style="display:none" title="撤销刚才的一键整理（同 Ctrl+Z）">↩ 撤销整理</button>
       </div>
       ${q.review_comment ? `<div class="wq-comment">💬 ${esc(q.review_comment)}</div>` : ''}
     </div>`;
@@ -2323,6 +2423,9 @@ function renderReviewModal() {
       if (d.ok) { CURRENT_CHECKIN = d.checkin; renderDrawer(); }
     };
   }
+
+  // 根据已记录的撤销状态显示/隐藏每题旁的「撤销整理」按钮
+  updateUndoBlankButtons();
 }
 
 function renderAnswerCandidates(idx, candidates) {
@@ -2420,6 +2523,8 @@ async function handleReviewModalAction(act, idx) {
 
   if (act === 'blank') {
     // 一键整理为印刷体：把正确答案/学生答案从题目中移除，替换为下划线空白
+    // 先拍快照，方便 Ctrl+Z / 撤销按钮回滚
+    const beforeSnap = snapshotQuestion(idx);
     const contentEl = document.getElementById(`rqe-content-${idx}`);
     const ans = document.getElementById(`rqe-ans-${idx}`).value.trim();
     const stu = document.getElementById(`rqe-stu-${idx}`).value.trim();
@@ -2431,7 +2536,17 @@ async function handleReviewModalAction(act, idx) {
     content = content.replace(/\([^)]{1,20}\)/g, '(________)');
     contentEl.value = content;
     RQE_UNDO.get(`${idx}-content`)?.save();
-    toast('已把答案处替换为空白，请再检查题目是否通顺');
+
+    REVIEW_MODAL_UNDO.push({ idx, before: beforeSnap });
+    REVIEW_MODAL_REDO = []; // 有新操作时清空重做栈
+    REVIEW_MODAL_LAST_IDX = idx;
+    updateUndoBlankButtons();
+    toast('已把答案处替换为空白；Ctrl+Z 或「撤销整理」可回退');
+    return;
+  }
+
+  if (act === 'undoBlank') {
+    undoReviewModalBlank();
     return;
   }
 
