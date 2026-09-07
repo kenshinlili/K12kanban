@@ -23,7 +23,8 @@ CREATE TABLE IF NOT EXISTS boards (
   name TEXT NOT NULL,
   org_type TEXT NOT NULL,
   track_mode TEXT NOT NULL,
-  sort_order INTEGER DEFAULT 0
+  sort_order INTEGER DEFAULT 0,
+  no_checkin INTEGER DEFAULT 0
 );
 
 -- 知识点：两级结构（parent_id 指向一级「单元」，NULL 表示一级或扁平项）
@@ -143,16 +144,18 @@ REVIEW_RULES = [
 
 BOARDS = [
     # 语文
-    ('cn_school_drill', '语文', '校内精练', '校内', '单元', 1),
-    ('cn_dictation', '语文', '听写', '校内', '单元', 2),
-    ('cn_essay', '语文', '作文', '校内', '单元', 3),
-    ('cn_xes', '语文', '学而思', '校外', '主题', 4),
+    ('cn_school_drill', '语文', '校内精练', '校内', '单元', 1, 0),
+    ('cn_dictation', '语文', '听写', '校内', '单元', 2, 0),
+    ('cn_essay', '语文', '作文', '校内', '单元', 3, 0),
+    ('cn_xes', '语文', '学而思', '校外', '主题', 4, 0),
+    ('cn_xes_daily', '语文', '天天练', '校外', '每日', 5, 0),
+    ('cn_xes_accumulate', '语文', '日积月累', '校外', '主题', 6, 0),
     # 数学
-    ('math_school', '数学', '校内', '校内', '主题', 5),
-    ('math_outside', '数学', '校外', '校外', '主题', 6),
+    ('math_school', '数学', '校内', '校内', '主题', 7, 0),
+    ('math_outside', '数学', '校外', '校外', '主题', 8, 0),
     # 英语
-    ('en_school', '英语', '校内', '校内', '单元', 7),
-    ('en_outside', '英语', '校外', '校外', '主题', 8),
+    ('en_school', '英语', '校内', '校内', '单元', 9, 0),
+    ('en_outside', '英语', '校外', '校外', '主题', 10, 0),
 ]
 
 # ---------------------------------------------------------------------------
@@ -200,6 +203,8 @@ TREE_KNOWLEDGE = {
 # 扁平板块（校外 / 数学 / 英语）
 FLAT_KNOWLEDGE = {
     'cn_xes': ['基础知识', '阅读理解', '作文技法', '古诗文'],
+    'cn_xes_daily': ['天天练'],     # 学而思：不分单元，每日做完就上传作业
+    # 'cn_xes_accumulate': 日积月累目录用户稍后上传，先留空板块
     'math_school': ['大数的认识', '公顷和平方千米', '角的度量', '三位数乘两位数',
                     '平行四边形和梯形', '除数是两位数的除法', '条形统计图', '数学广角'],
     'math_outside': ['计算', '应用题', '几何', '数论', '行程'],
@@ -217,7 +222,13 @@ def get_conn():
 
 def migrate_db(conn):
     """对已有数据库做增量字段迁移（SQLite 不支持 IF NOT EXISTS ADD COLUMN）。"""
-    # 1. wrong_questions 加 answer_candidates
+    # 1. boards 加 no_checkin（考试类板块不需要每日打卡）
+    board_cols = [r['name'] for r in conn.execute('PRAGMA table_info(boards)').fetchall()]
+    if 'no_checkin' not in board_cols:
+        conn.execute("ALTER TABLE boards ADD COLUMN no_checkin INTEGER DEFAULT 0")
+    conn.execute("UPDATE boards SET no_checkin=1 WHERE id='cn_exam'")
+
+    # 2. wrong_questions 加 answer_candidates
     cols = [r['name'] for r in conn.execute('PRAGMA table_info(wrong_questions)').fetchall()]
     if 'answer_candidates' not in cols:
         conn.execute("ALTER TABLE wrong_questions ADD COLUMN answer_candidates TEXT")
@@ -323,8 +334,8 @@ def init_db():
         # 种子板块
         for b in BOARDS:
             conn.execute(
-                'INSERT OR IGNORE INTO boards (id, subject, name, org_type, track_mode, sort_order) '
-                'VALUES (?, ?, ?, ?, ?, ?)', b)
+                'INSERT OR IGNORE INTO boards (id, subject, name, org_type, track_mode, sort_order, no_checkin) '
+                'VALUES (?, ?, ?, ?, ?, ?, ?)', b)
         # 种子知识点：两级板块 + 扁平板块
         for board_id, tree in TREE_KNOWLEDGE.items():
             _seed_tree(conn, board_id, tree)
@@ -351,11 +362,13 @@ def ensure_exam_knowledge(conn):
     这样单元测验 / 月考 / 期中期末都能找到知识点归口，且同一单元可反复提交。
     放在种子数据之后执行，因此对已导入的真实目录同样生效。
     """
-    EXAM_BOARD = ('cn_exam', '语文', '考试和测验', '校内', '单元', 5)
+    EXAM_BOARD = ('cn_exam', '语文', '考试和测验', '校内', '单元', 5, 1)
     EXAM_NAME = '考试和测验'
     conn.execute(
-        'INSERT OR IGNORE INTO boards (id, subject, name, org_type, track_mode, sort_order) '
-        'VALUES (?, ?, ?, ?, ?, ?)', EXAM_BOARD)
+        'INSERT OR IGNORE INTO boards (id, subject, name, org_type, track_mode, sort_order, no_checkin) '
+        'VALUES (?, ?, ?, ?, ?, ?, ?)', EXAM_BOARD)
+    # 确保考试板块标记为「无需打卡」
+    conn.execute("UPDATE boards SET no_checkin=1 WHERE id='cn_exam'")
 
     # 语文所有板块下的一级知识点（单元）按名字去重，作为建考试项的基准
     rows = conn.execute(

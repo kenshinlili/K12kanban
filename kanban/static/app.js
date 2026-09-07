@@ -217,19 +217,20 @@ function boardCard(b) {
   const ci = b.checkin;
   const kpTag = `<span class="tag ${b.track_mode === '单元' ? 'unit' : 'topic'}">${b.track_mode}</span>`;
   const orgTag = `<span class="tag ${b.org_type === '校内' ? 'school' : 'outside'}">${b.org_type}</span>`;
+  const noCheckin = b.no_checkin;
 
-  // ---------- 未打卡：只打卡（完成/无任务）+ 传作业 ----------
+  // ---------- 未打卡 ----------
   if (!ci) {
     return `<div class="board-card" data-board="${b.id}">
       <div class="bc-head">
         <div class="bc-name">${esc(b.name)}</div>
         <div class="bc-tags">${orgTag}${kpTag}</div>
       </div>
-      <div class="bc-meta"><span>— 今日未打卡</span></div>
-      <div class="bc-actions">
+      <div class="bc-meta"><span>${noCheckin ? '— 无需打卡 · 直接传作业' : '— 今日未打卡'}</span></div>
+      ${noCheckin ? '' : `<div class="bc-actions">
         <button class="btn btn-check" data-act="checkin">☐ 今日完成</button>
         <button class="btn btn-skip btn-sm" data-act="skip">— 今日无任务</button>
-      </div>
+      </div>`}
       <div class="bc-actions" style="margin-top:6px">
         <button class="btn btn-sm" data-act="upload-hw" title="创建一条独立作业记录（拍照给 AI 识别错题）。作业与今日打卡互相独立，取消打卡不会删作业">📚 传作业</button>
       </div>
@@ -1078,8 +1079,9 @@ async function renderKnowledge() {
           return;
         }
 
-        h += `<div class="kp-unit">
+        h += `<div class="kp-unit" data-unit="${esc(unitName)}" data-subject="${esc(sub)}">
           <div class="kp-unit-head">
+            <span class="kp-toggle" title="折叠/展开">▼</span>
             <span class="kp-unit-name kp-clickable" data-kpids="${unitKpIds.join(',')}"
                   title="查看整个单元的作业历史">${esc(unitName)}${unitTotal ? `<span class="kp-hw-badge">📚${unitTotal}</span>` : ''}</span>
             <span class="kp-unit-count">${names.length} 项</span>
@@ -1123,6 +1125,19 @@ async function renderKnowledge() {
         e.stopPropagation();
         openKpHwModal(el.dataset.kpids);
       };
+    });
+    // 单元折叠 / 展开
+    document.querySelectorAll('.kp-unit').forEach(unit => {
+      const key = `kp-collapsed-${unit.dataset.subject}-${unit.dataset.unit}`;
+      if (localStorage.getItem(key) === '1') unit.classList.add('collapsed');
+      const toggle = unit.querySelector('.kp-toggle');
+      if (toggle) {
+        toggle.onclick = e => {
+          e.stopPropagation();
+          unit.classList.toggle('collapsed');
+          localStorage.setItem(key, unit.classList.contains('collapsed') ? '1' : '0');
+        };
+      }
     });
     const btnEdit = document.getElementById('btnToggleKpEdit');
     if (btnEdit) {
@@ -1369,6 +1384,23 @@ async function openCheckin(cid) {
 function renderCheckinForm() {
   const b = CURRENT_BOARD;
   const kps = STATE.data.knowledge_points[b.id] || [];
+  const noCheckin = b.no_checkin;
+
+  // 考试/测验类板块：不需要每日打卡，直接引导上传作业/试卷
+  if (noCheckin) {
+    document.getElementById('drawerBody').innerHTML = `
+      <div class="section">
+        <h3>📝 ${esc(b.name)} <span class="sub">无需每日打卡</span></h3>
+        <p style="font-size:13px;color:var(--text-soft);line-height:1.6">
+          「${esc(b.name)}」属于考试/测验类板块，不需要点击「今日完成」。<br>
+          有试卷或作业需要批改时，直接点击下方「传作业」拍照上传即可。
+        </p>
+        <button class="btn btn-primary" id="btnNoCheckinUpload" style="width:100%;margin-top:12px">📚 传作业</button>
+      </div>`;
+    document.getElementById('btnNoCheckinUpload').onclick = () => openHomeworkModal(b.id);
+    return;
+  }
+
   document.getElementById('drawerBody').innerHTML = `
     <div class="section">
       <h3>✅ 今日打卡 <span class="sub">${STATE.date}</span></h3>

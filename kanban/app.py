@@ -905,6 +905,11 @@ def api_checkin():
 
     conn = db.get_conn()
     try:
+        # 考试类板块不需要每日打卡，直接传作业即可
+        board = conn.execute('SELECT no_checkin FROM boards WHERE id=?', (board_id,)).fetchone()
+        if entry_type == 'daily' and board and board['no_checkin']:
+            return jsonify({'ok': False, 'error': '该板块无需打卡，请直接「传作业」'}), 400
+
         # 每日打卡（daily）：同一板块同一天只能一条
         if entry_type == 'daily':
             # 已取消（archived）的打卡不算数，允许当天重新打卡
