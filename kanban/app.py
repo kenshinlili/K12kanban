@@ -1895,6 +1895,74 @@ def api_kp_homeworks(kid):
         conn.close()
 
 
+@app.route('/api/knowledge-points/homeworks')
+def api_kps_homeworks():
+    """多个知识点的作业合并查询（V1.22 聚合视图用）。
+
+    全景图里同一篇课文在不同板块各存了一份（校内精练 / 听写 / 作文…），
+    聚合展示后一次点击要看到「这一课」的全部作业，所以支持 ?ids=1,2,3 批量查。
+    返回的每条作业都带 board_name / kp_name，弹层里能区分属于哪类作业。
+    """
+    ids = [int(p) for p in request.args.get('ids', '').split(',') if p.strip().isdigit()]
+    if not ids:
+        return jsonify({'ok': True, 'homeworks': [], 'kps': []})
+    conn = db.get_conn()
+    try:
+        ph = ','.join('?' * len(ids))
+        kps = conn.execute(
+            f'SELECT * FROM knowledge_points WHERE id IN ({ph})', tuple(ids)).fetchall()
+        if not kps:
+            return jsonify({'ok': True, 'homeworks': [], 'kps': []})
+
+        # 传进来的是父级（单元）时，要带上其下所有课文
+        all_ids = list(ids)
+        for kp in kps:
+            if not kp['parent_id']:
+                for r in conn.execute(
+                        'SELECT id FROM knowledge_points WHERE parent_id=?',
+                        (kp['id'],)).fetchall():
+                    if r['id'] not in all_ids:
+                        all_ids.append(r['id'])
+
+        ph2 = ','.join('?' * len(all_ids))
+        rows = conn.execute(f'''
+            SELECT c.* FROM checkins c
+            WHERE c.entry_type='homework' AND c.kp_id IN ({ph2})
+            ORDER BY c.checkin_date DESC, c.id DESC
+        ''', tuple(all_ids)).fetchall()
+
+        boards = {b['id']: b for b in conn.execute('SELECT * FROM boards').fetchall()}
+        kp_map = {k['id']: k for k in kps}
+
+        out = []
+        for r in rows:
+            item = row2dict(r)
+            item['photo_count'] = conn.execute(
+                'SELECT COUNT(*) AS c FROM photos WHERE checkin_id=?',
+                (r['id'],)).fetchone()['c']
+            run = conn.execute(
+                'SELECT * FROM ai_runs WHERE checkin_id=? ORDER BY version DESC LIMIT 1',
+                (r['id'],)).fetchone()
+            item['wrong_count'] = conn.execute(
+                "SELECT COUNT(*) AS c FROM wrong_questions WHERE run_id=? "
+                "AND status='confirmed'",
+                (run['id'],)).fetchone()['c'] if run else 0
+            item['pending_count'] = conn.execute(
+                "SELECT COUNT(*) AS c FROM wrong_questions WHERE run_id=? "
+                "AND status='pending'",
+                (run['id'],)).fetchone()['c'] if run else 0
+            b = boards.get(r['board_id'])
+            item['board_name'] = b['name'] if b else ''
+            item['subject'] = b['subject'] if b else ''
+            item['kp_name'] = r['kp_name'] or (kp_map.get(r['kp_id']) or {}).get('name', '')
+            out.append(item)
+
+        return jsonify({'ok': True, 'homeworks': out,
+                        'kps': [row2dict(k) for k in kps]})
+    finally:
+        conn.close()
+
+
 # ---------------- 历史 / 统计 ----------------
 
 @app.route('/api/board/<board_id>/history')

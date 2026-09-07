@@ -335,9 +335,59 @@ def init_db():
             conn.execute(
                 'INSERT OR IGNORE INTO review_rules (subject, intervals, max_stages) '
                 'VALUES (?, ?, ?)', (subject, intervals, max_stages))
+        ensure_exam_knowledge(conn)
         conn.commit()
     finally:
         conn.close()
+
+
+def ensure_exam_knowledge(conn):
+    """V1.22：为语文每个单元补一个「考试和测验」知识点（幂等，可重复执行）。
+
+    用户定的目录规范：每个单元除了课文，还要有单元级的归口——
+      · 习作（作文）→ 已有独立板块 cn_essay
+      · 考试和测验   → 本函数建 cn_exam 板块，并在每个单元下建同名子项
+
+    这样单元测验 / 月考 / 期中期末都能找到知识点归口，且同一单元可反复提交。
+    放在种子数据之后执行，因此对已导入的真实目录同样生效。
+    """
+    EXAM_BOARD = ('cn_exam', '语文', '考试和测验', '校内', '单元', 5)
+    EXAM_NAME = '考试和测验'
+    conn.execute(
+        'INSERT OR IGNORE INTO boards (id, subject, name, org_type, track_mode, sort_order) '
+        'VALUES (?, ?, ?, ?, ?, ?)', EXAM_BOARD)
+
+    # 语文所有板块下的一级知识点（单元）按名字去重，作为建考试项的基准
+    rows = conn.execute(
+        "SELECT kp.id, kp.name FROM knowledge_points kp "
+        "JOIN boards b ON b.id = kp.board_id "
+        "WHERE b.subject='语文' AND kp.parent_id IS NULL "
+        "ORDER BY kp.sort_order, kp.id").fetchall()
+    unit_names = []
+    for r in rows:
+        if r['name'] not in unit_names:
+            unit_names.append(r['name'])
+
+    for unit_name in unit_names:
+        row = conn.execute(
+            'SELECT id FROM knowledge_points '
+            'WHERE board_id=? AND name=? AND parent_id IS NULL',
+            ('cn_exam', unit_name)).fetchone()
+        if row:
+            pid = row['id']
+        else:
+            pid = conn.execute(
+                'INSERT INTO knowledge_points (board_id, name, parent_id, sort_order) '
+                'VALUES (?, ?, NULL, 0)', ('cn_exam', unit_name)).lastrowid
+        exists = conn.execute(
+            'SELECT id FROM knowledge_points '
+            'WHERE board_id=? AND parent_id=? AND name=?',
+            ('cn_exam', pid, EXAM_NAME)).fetchone()
+        if not exists:
+            # sort_order=99 保证排在同单元其他课文之后
+            conn.execute(
+                'INSERT INTO knowledge_points (board_id, name, parent_id, sort_order) '
+                'VALUES (?, ?, ?, 99)', ('cn_exam', EXAM_NAME, pid))
 
 
 def now_str():

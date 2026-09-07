@@ -389,22 +389,44 @@ function closeHomeworkModal() {
    同一课可以反复提交（单元考考几次是常态），每次一条记录、各自独立状态。
    状态：待识别 → 待审核 → 已完成；不满意可打回重跑（待重跑）。 */
 let KPHW_CTX = null;   // 当前弹层的知识点上下文，供「上传新作业」预填
+// V1.22：知识点全景图默认「浏览模式」，不显示任何删除按钮（防误删）；
+// 只有点顶部「⚙ 目录管理」进入编辑模式后，才出现新增 / 删除入口。
+let KP_EDIT_MODE = false;
 
-async function openKpHwModal(kpId) {
-  const r = await get(`/knowledge-point/${kpId}/homeworks`);
+async function openKpHwModal(kpIdOrIds) {
+  // V1.22：传进来的可能是单个 id，也可能是 "1,2,3"（同一课跨板块聚合）
+  const ids = String(kpIdOrIds).split(',').map(s => s.trim()).filter(Boolean);
+  const r = ids.length > 1
+    ? await get(`/knowledge-points/homeworks?ids=${ids.join(',')}`)
+    : await get(`/knowledge-point/${ids[0]}/homeworks`);
   if (!r.ok) { toast(r.error || '加载作业历史失败'); return; }
-  const { kp, board, homeworks } = r;
-  KPHW_CTX = {
-    kp_id: kp.id,
-    board_id: board ? board.id : null,
-    kp_name: kp.name,
-    board_name: board ? board.name : '',
-  };
+  const { kp, board, homeworks, kps } = r;
 
-  const head = [
-    board ? `${esc(board.subject)} · ${esc(board.name)}` : '',
-    esc(kp.name),
-  ].filter(Boolean).join(' · ');
+  let head, ctxBoardId, ctxKpId, ctxKpName;
+  if (kp) {
+    head = [board ? `${esc(board.subject)} · ${esc(board.name)}` : '',
+            esc(kp.name)].filter(Boolean).join(' · ');
+    ctxBoardId = board ? board.id : null;
+    ctxKpId = kp.id;
+    ctxKpName = kp.name;
+  } else {
+    // 聚合视图：这一课在多个板块各有一份，标题只显示课文名
+    const first = (kps || [])[0] || {};
+    const b0 = (STATE.data.boards || []).find(x => x.id === first.board_id);
+    head = [b0 ? esc(b0.subject) : '', esc(first.name || '作业历史')]
+      .filter(Boolean).join(' · ');
+    ctxBoardId = first.board_id || null;
+    ctxKpId = first.id || null;
+    ctxKpName = first.name || '';
+  }
+  KPHW_CTX = {
+    kp_id: ctxKpId,
+    board_id: ctxBoardId,
+    kp_name: ctxKpName,
+    board_name: board ? board.name : '',
+    // 聚合时记下每个板块对应的知识点，供「上传新作业」精确预选
+    options: (kps || []).map(k => ({ kp_id: k.id, board_id: k.board_id })),
+  };
 
   let h = `<div class="kphw-head">
     <div style="font-weight:700;font-size:15px">${head}</div>
@@ -421,7 +443,9 @@ async function openKpHwModal(kpId) {
       const stText = STATUS_TEXT[hw.status] || hw.status;
       return `<div class="kphw-item">
         <div class="kphw-item-main">
-          <div class="kphw-item-date">📅 ${hw.checkin_date}</div>
+          <div class="kphw-item-date">📅 ${hw.checkin_date}
+            ${ids.length > 1 && hw.board_name
+              ? `<span class="kphw-type">${esc(hw.board_name)}</span>` : ''}</div>
           <div class="kphw-item-meta">
             <span class="status-pill sp-${hw.status}">${esc(stText)}</span>
             ${hw.photo_count ? `<span>📷 ${hw.photo_count} 张</span>` : ''}
@@ -431,7 +455,8 @@ async function openKpHwModal(kpId) {
           </div>
         </div>
         <div class="kphw-item-acts">
-          <button class="btn btn-sm" data-kphw-open="${hw.id}">👁 查看</button>
+          <button class="btn btn-sm" data-kphw-open="${hw.id}"
+            title="打开这次作业：可改照片 / 改错题 / 打回重跑">📂 打开</button>
           <button class="btn btn-danger btn-sm" data-kphw-del="${hw.id}">🗑</button>
         </div>
       </div>`;
@@ -444,6 +469,8 @@ async function openKpHwModal(kpId) {
 
   document.querySelectorAll('[data-kphw-open]').forEach(btn => {
     btn.onclick = async () => {
+      // 先关弹层：否则抽屉被弹层遮住，看起来像"点了没反应"（V1.22）
+      closeKpHwModal();
       await openCheckin(parseInt(btn.dataset.kphwOpen));
     };
   });
@@ -981,73 +1008,126 @@ async function renderKnowledge() {
 
   function showManage() {
     let h = '';
-    // V1.21：统计每个知识点的作业次数（父级「单元」汇总其下所有课文）
+    // V1.22 聚合视图：同一篇课文在校内精练/听写/作文等板块各存一份，
+    // 这里按「学科 → 单元 → 课文」合并，一课只显示一行，后面挂各作业类型的徽章。
+    const boardsById = {};
+    boards.forEach(b => boardsById[b.id] = b);
     const hwCount = {};
     (STATE.data.homeworks || []).forEach(hw => {
       if (hw.kp_id) hwCount[hw.kp_id] = (hwCount[hw.kp_id] || 0) + 1;
     });
-    const childIdsOf = {};
-    Object.values(STATE.data.knowledge_points || {}).forEach(list => {
+
+    const tree = {};   // subject -> unitName -> { lessons: { name: [item...] } }
+    Object.entries(STATE.data.knowledge_points || {}).forEach(([bid, list]) => {
+      const board = boardsById[bid];
+      if (!board) return;
+      const subjTree = tree[board.subject] = tree[board.subject] || {};
+      const byId = {};
+      list.forEach(k => byId[k.id] = k);
       list.forEach(k => {
-        if (k.parent_id) (childIdsOf[k.parent_id] = childIdsOf[k.parent_id] || []).push(k.id);
+        const hasChildren = list.some(x => x.parent_id === k.id);
+        // 纯容器（有子项的单元）不当作课文，避免出现「单元 → 单元」的自指行
+        if (!k.parent_id && hasChildren) return;
+        const parent = k.parent_id ? byId[k.parent_id] : null;
+        const unitName = parent ? parent.name : k.name;
+        const lessonName = k.name;
+        const u = subjTree[unitName] = subjTree[unitName] || { lessons: {}, parentIds: {} };
+        if (parent) u.parentIds[bid] = parent.id;   // 编辑模式新增时要带父级 id
+        const arr = u.lessons[lessonName] = u.lessons[lessonName] || [];
+        arr.push({ kpId: k.id, boardId: bid, boardName: board.name,
+                   n: hwCount[k.id] || 0 });
       });
     });
-    const totalHw = kid =>
-      (hwCount[kid] || 0) + (childIdsOf[kid] || []).reduce((s, c) => s + (hwCount[c] || 0), 0);
-    const hwBadge = kid => {
-      const n = totalHw(kid);
-      return n ? `<span class="kp-hw-badge">📚${n}</span>` : '';
-    };
+
+    // 目录管理（编辑模式）：只有在这里才允许增删改，防止浏览时误删
+    const edit = KP_EDIT_MODE;
+    h = `<div class="kp-manage-bar">
+      <button class="btn btn-sm ${edit ? 'btn-warn' : ''}" id="btnToggleKpEdit">
+        ${edit ? '✓ 完成编辑' : '⚙ 目录管理'}
+      </button>
+      <span class="kp-manage-tip">${edit
+        ? '编辑模式：可新增 / 改名 / 删除知识点。改完记得点「完成编辑」'
+        : '浏览模式：点击课文查看作业，点类型徽章只看该类作业'}</span>
+    </div>`;
 
     SUBJECT_ORDER.forEach(sub => {
-      const bs = boards.filter(b => b.subject === sub);
-      if (!bs.length) return;
+      const units = tree[sub];
+      if (!units) return;
       h += `<div class="subject-group"><div class="subject-title">
         <span class="dot ${SUBJECT_CLASS[sub]}"></span>${sub}</div>`;
-      bs.forEach(b => {
-        const kps = STATE.data.knowledge_points[b.id] || [];
-        const parents = kps.filter(k => !k.parent_id);
-        const childrenOf = pid => kps.filter(k => k.parent_id === pid);
-        h += `<div class="kp-board">
-          <div class="kp-title">${esc(b.name)}
-            <span class="tag ${b.org_type === '校内' ? 'school' : 'outside'}">${b.org_type}</span>
-            <span class="tag ${b.track_mode === '单元' ? 'unit' : 'topic'}">按${b.track_mode}</span>
+
+      Object.keys(units).forEach(unitName => {
+        const lessons = units[unitName].lessons;
+        const names = Object.keys(lessons);
+        if (!names.length) return;
+        // 该单元下全部 kpId（点单元名 = 看整个单元的作业）
+        const unitKpIds = [];
+        names.forEach(n => lessons[n].forEach(it => unitKpIds.push(it.kpId)));
+        const unitTotal = names.reduce(
+          (s, n) => s + lessons[n].reduce((t, it) => t + it.n, 0), 0);
+
+        // 扁平学科（数学/英语主题制）：单元下只有一项且同名，直接渲染成一行
+        if (names.length === 1 && names[0] === unitName) {
+          const items = lessons[names[0]];
+          h += `<div class="kp-list" style="margin-bottom:8px">
+            <div class="kp-chip kp-clickable" data-kpids="${unitKpIds.join(',')}"
+                 title="查看作业历史">${esc(unitName)}${typeBadges(items, edit)}
+              ${edit ? delBtn(items[0].kpId) : ''}</div>
+            ${edit ? `<button class="kp-add" data-kpadd="${items[0].boardId}">+ 新增</button>` : ''}
           </div>`;
-        if (parents.length) {
-          // 两级：单元 → 课文
-          h += parents.map(p => {
-            const kids = childrenOf(p.id);
-            return `<div class="kp-unit">
-              <div class="kp-unit-head">
-                <span class="kp-unit-name kp-clickable" data-kphw="${p.id}" title="查看整个单元的作业历史">${esc(p.name)}${hwBadge(p.id)}</span>
-                <span class="kp-unit-count">${kids.length} 项</span>
-                <button class="kp-unit-del" data-kpdel="${p.id}" title="删除整个单元">✕</button>
-              </div>
-              ${kids.length ? `<div class="kp-list">${kids.map(k =>
-                `<div class="kp-chip kp-clickable" data-kphw="${k.id}" title="查看这个知识点的作业历史（可反复提交）">${esc(k.name)}${hwBadge(k.id)}
-                  <button class="del" data-kpdel="${k.id}" title="删除">×</button></div>`).join('')}
-                <button class="kp-add" data-kpadd="${b.id}" data-kpparent="${p.id}">+ 加课文</button>
-              </div>` : `<div class="kp-list"><button class="kp-add" data-kpadd="${b.id}" data-kpparent="${p.id}">+ 加课文</button></div>`}
-            </div>`;
-          }).join('');
-        } else {
-          // 扁平板块（校外/数学/英语）
-          h += `<div class="kp-list" data-kpboard="${b.id}">
-            ${kps.map(k => `<div class="kp-chip kp-clickable" data-kphw="${k.id}" title="查看这个知识点的作业历史（可反复提交）">${esc(k.name)}${hwBadge(k.id)}
-              <button class="del" data-kpdel="${k.id}" title="删除">×</button></div>`).join('')}
-            <button class="kp-add" data-kpadd="${b.id}">+ 新增</button>
-          </div>`;
+          return;
         }
-        h += `</div>`;
+
+        h += `<div class="kp-unit">
+          <div class="kp-unit-head">
+            <span class="kp-unit-name kp-clickable" data-kpids="${unitKpIds.join(',')}"
+                  title="查看整个单元的作业历史">${esc(unitName)}${unitTotal ? `<span class="kp-hw-badge">📚${unitTotal}</span>` : ''}</span>
+            <span class="kp-unit-count">${names.length} 项</span>
+          </div>
+          <div class="kp-list">
+            ${names.map(n => {
+              const items = lessons[n];
+              const total = items.reduce((s, it) => s + it.n, 0);
+              return `<div class="kp-chip kp-clickable" data-kpids="${items.map(it => it.kpId).join(',')}"
+                   title="查看这一课的作业历史（可反复提交）">${esc(n)}${total ? `<span class="kp-hw-badge">📚${total}</span>` : ''}${typeBadges(items, edit)}
+                ${edit ? delBtn(items[0].kpId) : ''}</div>`;
+            }).join('')}
+            ${edit ? `<button class="kp-add" data-kpadd="${lessons[names[0]][0].boardId}"
+              data-kpparent="${units[unitName].parentIds[lessons[names[0]][0].boardId] || ''}"
+              >+ 加一项</button>` : ''}
+          </div>
+        </div>`;
       });
       h += `</div>`;
     });
+
+    // 类型徽章：一课对应多个板块时，按板块分别显示作业数；
+    // 点击某个徽章只看那一类（浏览模式），编辑模式下徽章不可点（避免误触删除）
+    function typeBadges(items, editMode) {
+      if (items.length <= 1) return '';
+      return `<span class="kp-types">${items.map(it =>
+        `<span class="kp-type ${it.n ? 'has' : ''} ${editMode ? '' : 'kp-type-click'}"
+          ${editMode ? '' : `data-kpids="${it.kpId}"`}
+          title="只看「${esc(it.boardName)}」这类作业">${esc(it.boardName)}${it.n ? ' ' + it.n : ''}</span>`
+      ).join('')}</span>`;
+    }
+    function delBtn(kid) {
+      return `<button class="del" data-kpdel="${kid}" title="删除">×</button>`;
+    }
+
     document.getElementById('kpBody').innerHTML = h;
     bindKpManageEvents();
-    // 点知识点 → 打开该知识点的作业历史
-    document.querySelectorAll('[data-kphw]').forEach(el => {
-      el.onclick = () => openKpHwModal(parseInt(el.dataset.kphw));
+    // 点课文 / 单元 / 类型 → 打开作业历史（V1.22 支持多个 kpId 聚合）
+    document.querySelectorAll('[data-kpids]').forEach(el => {
+      el.onclick = e => {
+        e.stopPropagation();
+        openKpHwModal(el.dataset.kpids);
+      };
     });
+    const btnEdit = document.getElementById('btnToggleKpEdit');
+    if (btnEdit) {
+      btnEdit.onclick = () => { KP_EDIT_MODE = !KP_EDIT_MODE; showManage(); };
+    }
   }
 
   async function showHeatmap() {
@@ -1270,7 +1350,19 @@ async function openCheckin(cid) {
   document.getElementById('drawerTitle').textContent =
     `${CURRENT_BOARD.subject} · ${CURRENT_BOARD.name}`;
   openDrawer();
-  renderDrawer();
+  // 必须 await：renderDrawer 是 async，不 await 会导致抽屉先开（空内容）、
+  // 且调用方无法感知渲染失败 —— 表现为"点了审核没反应"（V1.22 修复）
+  try {
+    await renderDrawer();
+  } catch (e) {
+    console.error('renderDrawer 失败', e);
+    const body = document.getElementById('drawerBody');
+    if (body && !body.innerHTML.trim()) {
+      body.innerHTML = `<div class="section"><h3>⚠️ 详情加载失败</h3>
+        <p style="font-size:13px;color:var(--text-soft)">${esc(String((e && e.message) || e))}</p></div>`;
+    }
+    toast('详情加载失败，请刷新重试');
+  }
   return true;
 }
 
@@ -1463,21 +1555,32 @@ async function renderDrawer() {
     </div>
   </div>`;
 
-  /* 历史打卡 */
-  const history = await loadBoardHistory(b.id);
-  const past = history.filter(h => h.id !== ci.id).slice(0, 10);
-  if (past.length) {
-    html += `<div class="section">
+  /* 历史打卡：占位，等主内容渲染完再异步填充（V1.22 —— 避免网络慢时抽屉空白） */
+  html += `<div id="drawerHistorySlot"></div>`;
+
+  document.getElementById('drawerBody').innerHTML = html;
+  bindDrawerEvents();
+  appendBoardHistory(b.id, ci.id);
+}
+
+// 历史打卡异步补：失败也不影响主流程（V1.22）
+async function appendBoardHistory(boardId, excludeCid) {
+  try {
+    const history = await loadBoardHistory(boardId);
+    const past = (history || []).filter(h => h.id !== excludeCid).slice(0, 10);
+    if (!past.length) return;
+    const box = document.getElementById('drawerHistorySlot');
+    if (!box) return;
+    box.innerHTML = `<div class="section">
       <h3>📅 历史打卡</h3>
       ${past.map(h => `<div class="tl-item">
         ${h.checkin_date} · ${h.duration_min ? h.duration_min + '分钟' : '未填时长'} ·
         错题 ${h.wrong_count} 题 ${h.summary ? '· ' + esc(h.summary) : ''}
       </div>`).join('')}
     </div>`;
+  } catch (e) {
+    console.warn('历史打卡加载失败（不影响主流程）', e);
   }
-
-  document.getElementById('drawerBody').innerHTML = html;
-  bindDrawerEvents();
 }
 
 function wrongQuestionCard(q) {

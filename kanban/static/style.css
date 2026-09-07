@@ -860,6 +860,30 @@ body {
 /* 知识点 chip 上的作业次数徽章 */
 .kp-chip.kp-clickable { cursor: pointer; }
 .kp-chip.kp-clickable:hover { border-color: var(--primary, #2563eb); background: #eff6ff; }
+
+/* V1.22 目录管理条：默认浏览模式无删除按钮，点「⚙ 目录管理」才进入编辑模式 */
+.kp-manage-bar {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin-bottom: 12px; padding: 9px 12px; border-radius: 10px;
+  background: var(--background-secondary, #f8fafc); border: 1px solid var(--border);
+}
+.kp-manage-tip { font-size: 12px; color: var(--text-soft); }
+
+/* 一课对应多个板块时的类型徽章（校内精练 / 听写 / 考试和测验…） */
+.kp-types { display: inline-flex; gap: 4px; margin-left: 6px; flex-wrap: wrap; }
+.kp-type {
+  display: inline-block; padding: 1px 6px; border-radius: 7px; font-size: 11px;
+  background: #f1f5f9; color: #64748b; border: 1px solid transparent;
+}
+.kp-type.has { background: #ecfdf5; color: #047857; border-color: #a7f3d0; }
+.kp-type-click { cursor: pointer; }
+.kp-type-click:hover { border-color: var(--primary, #2563eb); background: #eff6ff; }
+
+/* 作业历史弹层里标注这条作业属于哪一类 */
+.kphw-type {
+  display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: 7px;
+  background: #eef2ff; color: #4338ca; font-size: 11px; font-weight: 600;
+}
 .kp-hw-badge {
   display: inline-block; margin-left: 5px; padding: 1px 6px; border-radius: 8px;
   background: #e0e7ff; color: #3730a3; font-size: 11px; font-weight: 700;
