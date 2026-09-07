@@ -1054,8 +1054,12 @@ async function renderKnowledge() {
     SUBJECT_ORDER.forEach(sub => {
       const units = tree[sub];
       if (!units) return;
-      h += `<div class="subject-group"><div class="subject-title">
-        <span class="dot ${SUBJECT_CLASS[sub]}"></span>${sub}</div>`;
+      h += `<div class="subject-group" data-subject="${esc(sub)}">
+        <div class="subject-title kp-subject-head" title="折叠/展开该学科">
+          <span class="kp-toggle" title="折叠/展开">▼</span>
+          <span class="dot ${SUBJECT_CLASS[sub]}"></span>${sub}
+        </div>
+        <div class="subject-children">`;
 
       Object.keys(units).forEach(unitName => {
         const lessons = units[unitName].lessons;
@@ -1100,7 +1104,7 @@ async function renderKnowledge() {
           </div>
         </div>`;
       });
-      h += `</div>`;
+      h += `</div></div>`;
     });
 
     // 类型徽章：一课对应多个板块时，按板块分别显示作业数；
@@ -1136,6 +1140,21 @@ async function renderKnowledge() {
           e.stopPropagation();
           unit.classList.toggle('collapsed');
           localStorage.setItem(key, unit.classList.contains('collapsed') ? '1' : '0');
+        };
+      }
+    });
+    // 学科折叠 / 展开
+    document.querySelectorAll('.subject-group').forEach(sg => {
+      const sub = sg.dataset.subject;
+      const key = `kp-collapsed-sub-${sub}`;
+      if (localStorage.getItem(key) === '1') sg.classList.add('subject-collapsed');
+      const head = sg.querySelector('.kp-subject-head');
+      if (head) {
+        head.onclick = e => {
+          // 避免点击标题里的可交互元素时触发折叠
+          if (e.target.closest('[data-kpids]')) return;
+          sg.classList.toggle('subject-collapsed');
+          localStorage.setItem(key, sg.classList.contains('subject-collapsed') ? '1' : '0');
         };
       }
     });
@@ -2142,21 +2161,42 @@ function renderReviewModal() {
   const { checkin, questions } = REVIEW_MODAL_DATA;
   const board = CURRENT_BOARD;
   const pending = questions.filter(q => q.status === 'pending' || q.status === 'rerun_requested').length;
+  const confirmed = questions.filter(q => q.status === 'confirmed').length;
+  const rejected = questions.filter(q => q.status === 'rejected').length;
+  const rerunReq = questions.filter(q => q.status === 'rerun_requested').length;
 
   document.getElementById('reviewModalSubject').textContent = board?.subject || '科目';
   document.getElementById('reviewModalBoard').textContent = board?.name || '板块';
   document.getElementById('reviewModalMeta').textContent =
-    `${checkin.checkin_date} · ${checkin.photos.length} 张照片 · ${questions.length} 题 · 待审/待重识别 ${pending} 题`;
+    `${checkin.checkin_date} · ${checkin.photos.length} 张照片 · ${questions.length} 题 · ` +
+    `已确认 ${confirmed} · 已驳回 ${rejected} · 待重新识别 ${rerunReq} · 待审 ${pending}`;
 
   // 左侧照片区
   const left = document.getElementById('reviewModalLeft');
-  left.innerHTML = checkin.photos.length
+  const statusText = STATUS_TEXT[checkin.status] || checkin.status;
+  const overviewHtml = `
+    <div class="review-overview">
+      <div class="ro-title">📋 作业概况</div>
+      <div class="ro-grid">
+        <div><span class="ro-label">状态</span><span class="status-pill sp-${checkin.status}">${esc(statusText)}</span></div>
+        <div><span class="ro-label">日期</span><span>${checkin.checkin_date}</span></div>
+        <div><span class="ro-label">照片</span><span>${checkin.photos.length} 张</span></div>
+        <div><span class="ro-label">总题</span><span>${questions.length} 题</span></div>
+        <div><span class="ro-label">已确认</span><span style="color:#16a34a">${confirmed}</span></div>
+        <div><span class="ro-label">已驳回</span><span style="color:var(--danger)">${rejected}</span></div>
+        <div><span class="ro-label">待重识别</span><span style="color:var(--warn)">${rerunReq}</span></div>
+        <div><span class="ro-label">待审</span><span style="color:var(--primary)">${pending}</span></div>
+        ${checkin.kp_name ? `<div class="ro-full"><span class="ro-label">知识点</span><span>${esc(checkin.kp_name)}</span></div>` : ''}
+        ${checkin.note ? `<div class="ro-full"><span class="ro-label">备注</span><span>${esc(checkin.note)}</span></div>` : ''}
+      </div>
+    </div>`;
+  left.innerHTML = overviewHtml + (checkin.photos.length
     ? checkin.photos.map((p, i) => `
         <div class="photo-page">
           <img src="${p.url || '/uploads/' + p.filename}" alt="作业照片 ${i + 1}">
           <div class="photo-page-num">照片 ${i + 1} / ${checkin.photos.length}</div>
         </div>`).join('')
-    : '<p style="color:var(--text-soft);text-align:center">没有照片</p>';
+    : '<p style="color:var(--text-soft);text-align:center;margin-top:16px">没有照片</p>');
 
   // 右侧错题编辑区
   const right = document.getElementById('reviewModalRight');
@@ -2176,7 +2216,6 @@ function renderReviewModal() {
     html += `<div class="review-question-edit ${stateCls}" data-qidx="${idx}">
       <div class="rqe-header">
         <div><span class="rqe-num">${idx + 1}</span> <span class="rqe-status">${stateText}</span></div>
-        <button class="btn btn-sm" data-ract="printSingle" data-qidx="${idx}" title="把这题加入「打印列表」（右下角浮动按钮一键按学科排版打印）。同一题再点会从列表移除。">📋 加入打印列表</button>
       </div>
       <div class="rqe-field">
         <label>题目原文（必须从照片中原样提取印刷体，不要改写）<span class="tip">可编辑 · Ctrl+Z 撤销</span></label>
@@ -2443,11 +2482,14 @@ function openPrintModal(qList, opts) {
         if (!byBoard[bn]) byBoard[bn] = [];
         byBoard[bn].push(q);
       });
-      Object.keys(byBoard).forEach(bn => {
+        Object.keys(byBoard).forEach(bn => {
         html += `<div class="print-board-title">📘 ${esc(bn)}</div>`;
         byBoard[bn].forEach(q => {
-          html += `<div class="print-question">
-            <div class="print-question-num">${q._originalIdx + 1}.</div>
+          html += `<div class="print-question" data-print-idx="${q._originalIdx}">
+            <div class="print-question-header">
+              <div class="print-question-num">${q._originalIdx + 1}.</div>
+              ${opts.onClear ? `<button class="print-question-del" data-print-del="${q._originalIdx}" title="从打印列表移除">✕</button>` : ''}
+            </div>
             <div class="print-question-content">${esc(q.content)}</div>
             <div class="print-question-answer-line"></div>
           </div>`;
@@ -2457,8 +2499,11 @@ function openPrintModal(qList, opts) {
     });
   } else {
     qList.forEach((q, i) => {
-      html += `<div class="print-question">
-        <div class="print-question-num">${i + 1}.</div>
+      html += `<div class="print-question" data-print-idx="${i}">
+        <div class="print-question-header">
+          <div class="print-question-num">${i + 1}.</div>
+          ${opts.onClear ? `<button class="print-question-del" data-print-del="${i}" title="从打印列表移除">✕</button>` : ''}
+        </div>
         <div class="print-question-content">${esc(q.content)}</div>
         <div class="print-question-answer-line"></div>
       </div>`;
@@ -2479,6 +2524,28 @@ function openPrintModal(qList, opts) {
   if (opts.onClear) {
     const btn = document.getElementById('btnClearPrintQueue');
     if (btn) btn.onclick = opts.onClear;
+    // 打印列表预览：每题可单独删除
+    document.querySelectorAll('[data-print-del]').forEach(btn => {
+      btn.onclick = e => {
+        e.stopPropagation();
+        const idx = parseInt(btn.dataset.printDel);
+        removeFromPrintQueue(idx);
+      };
+    });
+  }
+}
+
+function removeFromPrintQueue(idx) {
+  if (idx < 0 || idx >= PRINT_QUEUE.length) return;
+  PRINT_QUEUE.splice(idx, 1);
+  savePrintQueue();
+  renderPrintFAB();
+  if (PRINT_QUEUE.length) {
+    openPrintQueueModal();
+    toast('已移除该题');
+  } else {
+    closePrintModal();
+    toast('打印列表已空');
   }
 }
 

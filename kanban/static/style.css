@@ -607,6 +607,26 @@ body {
 .review-modal-left .photo-page-num {
   text-align: center; font-size: 12px; color: var(--text-soft); margin-top: 7px;
 }
+.review-overview {
+  background: #fff; border: 1px solid var(--border); border-radius: 10px;
+  padding: 12px 14px; margin-bottom: 14px; box-shadow: var(--shadow);
+}
+.ro-title {
+  font-weight: 700; font-size: 14px; margin-bottom: 10px; color: var(--text);
+}
+.ro-grid {
+  display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px 12px;
+  font-size: 12.5px;
+}
+.ro-grid > div {
+  display: flex; align-items: center; gap: 6px;
+}
+.ro-grid .ro-full {
+  grid-column: 1 / -1;
+}
+.ro-label {
+  color: var(--text-soft); min-width: 4em;
+}
 .review-modal-right {
   flex: 1; overflow-y: auto; padding: 16px 18px 30px;
 }
@@ -689,7 +709,13 @@ body {
 .print-sheet-title { font-size: 18px; font-weight: 700; text-align: center; margin-bottom: 18px; }
 .print-sheet-sub { text-align: center; font-size: 12px; color: var(--text-soft); margin-bottom: 24px; }
 .print-question { margin-bottom: 22px; }
-.print-question-num { font-weight: 700; margin-bottom: 6px; }
+.print-question-header { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.print-question-num { font-weight: 700; }
+.print-question-del {
+  border: none; background: none; color: var(--text-soft); cursor: pointer;
+  font-size: 13px; line-height: 1; padding: 2px 4px; border-radius: 4px;
+}
+.print-question-del:hover { background: #fee2e2; color: var(--danger); }
 .print-question-content { margin-bottom: 8px; }
 .print-question-answer-line { border-bottom: 1px solid #111; height: 32px; margin-top: 8px; }
 
@@ -700,7 +726,7 @@ body {
     position: absolute; top: 0; left: 0; transform: none;
     width: 100%; max-height: none; box-shadow: none;
   }
-  .print-modal-header, .print-modal-footer { display: none; }
+  .print-modal-header, .print-modal-footer, .print-question-del { display: none; }
   .print-modal-body { padding: 20px; }
 }
 
@@ -930,3 +956,14 @@ body {
 .kp-unit.collapsed .kp-toggle { transform: rotate(-90deg); }
 .kp-unit.collapsed .kp-list { display: none; }
 .kp-unit.collapsed { padding-bottom: 9px; }
+
+/* 学科折叠开关 */
+.subject-title {
+  display: flex; align-items: center; gap: 8px;
+  font-weight: 700; font-size: 15px; margin: 16px 0 8px;
+  cursor: pointer; user-select: none;
+}
+.subject-title .kp-toggle { font-size: 13px; width: 22px; height: 22px; }
+.subject-collapsed .subject-title .kp-toggle { transform: rotate(-90deg); }
+.subject-collapsed .subject-children { display: none; }
+.subject-collapsed { margin-bottom: 6px; }
