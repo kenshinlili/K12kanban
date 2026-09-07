@@ -344,6 +344,20 @@ def api_state():
                 item['assigned_to'] = act['to_member_id'] if act else None
             todo.append(item)
 
+        # 待 AI 识别的作业（V1.26：新增独立的「待识别」入口）
+        pending_ai = []
+        rows = conn.execute('''
+            SELECT c.*, b.subject, b.name AS board_name
+            FROM checkins c JOIN boards b ON c.board_id = b.id
+            WHERE c.status = 'pending_ai' AND c.entry_type = 'homework'
+            ORDER BY c.created_at DESC LIMIT 50
+        ''').fetchall()
+        for r in rows:
+            item = row2dict(r)
+            item['photo_count'] = conn.execute(
+                'SELECT COUNT(*) AS c FROM photos WHERE checkin_id=?', (r['id'],)).fetchone()['c']
+            pending_ai.append(item)
+
         kp = {}
         for b in boards:
             rows = conn.execute(
@@ -356,6 +370,7 @@ def api_state():
             'members': members, 'boards': boards,
             'knowledge_points': kp, 'todo': todo,
             'homeworks': homeworks,
+            'pending_ai': pending_ai,
         })
     finally:
         conn.close()
@@ -1143,7 +1158,44 @@ def api_checkin_detail(cid):
         conn.close()
 
 
-# ---------------- AI 识别回填（供外部 AI 调用） ----------------
+# ---------------- AI 识别触发 / 回填（供外部 AI 调用） ----------------
+
+@app.route('/api/checkin/<int:cid>/recognize', methods=['POST'])
+def api_checkin_recognize(cid):
+    """用户主动请求对某条待识别作业进行 AI 识别。
+
+    当前版本：应用本身不内置视觉模型，本接口记录识别请求并返回提示；
+    实际识别由 WorkBuddy AI 助手（或外部 AI）通过 /api/pending-ai 拉取照片后，
+    再调用 /api/checkin/<cid>/ai-result 回填结果。记录请求后，前端可刷新「待识别」列表。
+    """
+    data = request.get_json() or {}
+    member_id = data.get('member_id') or 'dad'
+    conn = db.get_conn()
+    try:
+        ci = conn.execute('SELECT * FROM checkins WHERE id=?', (cid,)).fetchone()
+        if not ci:
+            return jsonify({'ok': False, 'error': 'not found'}), 404
+        if ci['status'] != 'pending_ai':
+            return jsonify({'ok': False, 'error': '该作业不处于待识别状态'}), 400
+        run = get_or_create_run(conn, cid)
+        conn.execute(
+            "UPDATE ai_runs SET status='requested', summary='用户请求识别', created_at=? WHERE id=?",
+            (db.now_str(), run['id']))
+        conn.execute(
+            "UPDATE checkins SET current_run_id=?, updated_at=? WHERE id=?",
+            (run['id'], db.now_str(), cid))
+        log_action(conn, cid, run['id'], member_id, 'request_recognize',
+                   '用户在「待识别」区点击「开始识别」')
+        conn.commit()
+        return jsonify({
+            'ok': True,
+            'checkin_id': cid,
+            'run_id': run['id'],
+            'msg': '识别请求已提交。AI 助手处理完毕后会自动进入「待处理」等待审核。'
+        })
+    finally:
+        conn.close()
+
 
 @app.route('/api/pending-ai')
 def api_pending_ai():

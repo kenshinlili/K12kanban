@@ -76,6 +76,7 @@ function render() {
   if (!STATE.data) return;
   renderMembers();
   renderKanban();
+  renderPendingAi();
   renderTodo();
   renderReview();
   renderWrongbook();
@@ -517,6 +518,72 @@ async function submitHomework() {
   closeHomeworkModal();
   toast(HW_PHOTOS.length ? '作业已上传，AI 将识别错题' : '作业已记录');
   await loadState();
+}
+
+/* ---------- 待识别（V1.26） ---------- */
+async function renderPendingAi() {
+  const container = document.getElementById('view-pending-ai');
+  const badge = document.getElementById('pendingAiBadge');
+  const items = (STATE.data.pending_ai || []);
+  badge.textContent = items.length;
+  badge.classList.toggle('zero', items.length === 0);
+
+  if (!items.length) {
+    container.innerHTML = `<div class="empty"><div class="emoji">🔍</div>
+      <div>没有待识别的作业</div>
+      <div style="font-size:12px;color:var(--text-soft);margin-top:6px">
+        在「今日看板」里点任意板块的「📚 传作业」上传照片，作业会出现在这里
+      </div></div>`;
+    return;
+  }
+
+  container.innerHTML = `<div class="pending-ai-header">
+    <div class="pending-ai-title">🔍 待 AI 识别 (${items.length})</div>
+    <div class="pending-ai-tip">上传后自动进入此区域，点「开始识别」即可请求 AI 助手处理</div>
+  </div>
+  <div class="pending-ai-list">${items.map(it => pendingAiCard(it)).join('')}</div>`;
+
+  container.querySelectorAll('[data-pending-ai]').forEach(btn => {
+    btn.onclick = async () => {
+      const cid = btn.dataset.pendingAi;
+      const orig = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = '请求中…';
+      const r = await post(`/checkin/${cid}/recognize`, { member_id: STATE.member });
+      if (r.ok) {
+        toast(r.msg || '识别请求已提交');
+      } else {
+        toast(r.error || '请求失败');
+      }
+      btn.disabled = false;
+      btn.textContent = orig;
+    };
+  });
+
+  container.querySelectorAll('[data-pending-open]').forEach(btn => {
+    btn.onclick = async () => {
+      await openCheckin(parseInt(btn.dataset.pendingOpen));
+    };
+  });
+}
+
+function pendingAiCard(it) {
+  const board = STATE.data.boards.find(b => b.id === it.board_id) || {};
+  return `<div class="pending-ai-item">
+    <div class="pending-ai-main">
+      <div class="pending-ai-title-row">${esc(it.subject)} · ${esc(it.board_name)}${it.kp_name ? ' · <b>' + esc(it.kp_name) + '</b>' : ''}</div>
+      <div class="pending-ai-meta">
+        <span>📅 ${it.checkin_date}</span>
+        <span>📷 ${it.photo_count || 0} 张</span>
+        <span class="status-pill sp-pending_ai">待识别</span>
+      </div>
+      ${it.note ? `<div class="pending-ai-note">📝 ${esc(it.note)}</div>` : ''}
+    </div>
+    <div class="pending-ai-actions">
+      <button class="btn btn-primary btn-sm" data-pending-ai="${it.id}">▶ 开始识别</button>
+      <button class="btn btn-sm" data-pending-open="${it.id}">查看</button>
+    </div>
+  </div>`;
 }
 
 async function renderTodo() {

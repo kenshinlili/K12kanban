@@ -30,6 +30,7 @@
 
 <nav class="tabs">
   <button class="tab active" data-view="kanban">📋 今日看板</button>
+  <button class="tab" data-view="pending-ai">🔍 待识别 <span class="badge" id="pendingAiBadge">0</span></button>
   <button class="tab" data-view="todo">🔔 待处理 <span class="badge" id="todoBadge">0</span></button>
   <button class="tab" data-view="review">🔁 复习 <span class="badge" id="reviewBadge">0</span></button>
   <button class="tab" data-view="wrongbook">❌ 错题本</button>
@@ -39,6 +40,9 @@
 <main id="app">
   <!-- 看板视图 -->
   <section class="view active" id="view-kanban"></section>
+
+  <!-- 待识别视图（V1.26） -->
+  <section class="view" id="view-pending-ai"></section>
 
   <!-- 待处理视图 -->
   <section class="view" id="view-todo"></section>
