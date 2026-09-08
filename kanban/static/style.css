@@ -794,6 +794,18 @@ body {
 .wb-kp-count { margin-left: auto; font-size: 11.5px; color: var(--text-soft); font-weight: 600; }
 .wb-kp-list { display: flex; flex-wrap: wrap; gap: 6px; }
 .kp-chip .kp-n { font-size: 11px; font-weight: 700; color: var(--primary); }
+
+/* 错题目录树（四年级上册 → 单元 → 课程，可收起）*/
+.wb-tree { background: var(--card); border: 1px solid var(--border); border-radius: 11px; padding: 6px 13px; box-shadow: var(--shadow); }
+.wb-top-node { border-bottom: 1px dashed var(--border); padding: 4px 0; }
+.wb-top-node:last-child { border-bottom: none; }
+.wb-top-head { display: flex; align-items: center; gap: 7px; cursor: pointer; font-size: 14px; padding: 6px 0; user-select: none; }
+.wb-top-head b { font-weight: 700; }
+.wb-top-children { padding-left: 15px; }
+.wb-unit-node { padding: 2px 0; }
+.wb-unit-head { display: flex; align-items: center; gap: 7px; cursor: pointer; font-size: 13px; padding: 5px 0; user-select: none; }
+.wb-unit-name { font-weight: 600; }
+.wb-unit-children { display: flex; flex-wrap: wrap; gap: 6px; padding: 3px 0 7px 15px; }
 .wb-errbar { background: var(--card); border: 1px solid var(--border); border-radius: 11px; padding: 12px 13px; box-shadow: var(--shadow); }
 .wb-errrow { display: flex; align-items: center; gap: 9px; margin-bottom: 7px; font-size: 12.5px; }
 .wb-errrow:last-child { margin-bottom: 0; }

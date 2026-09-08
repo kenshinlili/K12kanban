@@ -141,12 +141,65 @@ def get_or_create_run(conn, checkin_id):
 
 
 def get_review_rule(conn, subject):
-    """获取科目的复习规则"""
+    """获取科目的复习规则（旧 per-subject，V1.31 起被 review_config 取代，仅兼容保留）"""
     r = conn.execute(
         'SELECT * FROM review_rules WHERE subject=?', (subject,)).fetchone()
     if not r:
         return {'intervals': [2, 7, 30, 30], 'max_stages': 4}
     return {'intervals': json.loads(r['intervals']), 'max_stages': r['max_stages']}
+
+
+def get_review_config(conn):
+    """全局默认复习间隔（V1.31）。返回天数数组，长度即复习次数。"""
+    r = conn.execute('SELECT * FROM review_config WHERE id=1').fetchone()
+    if not r:
+        return list(db.DEFAULT_REVIEW_INTERVALS)
+    try:
+        iv = json.loads(r['intervals'] or '[]')
+        if isinstance(iv, list) and iv:
+            return [int(x) for x in iv]
+    except (json.JSONDecodeError, ValueError, TypeError):
+        pass
+    return list(db.DEFAULT_REVIEW_INTERVALS)
+
+
+def parse_intervals(text):
+    """把 JSON 间隔字符串解析成天数数组；非法/空返回 None。"""
+    if not text:
+        return None
+    try:
+        iv = json.loads(text)
+        if isinstance(iv, list) and iv:
+            return [int(x) for x in iv]
+    except (json.JSONDecodeError, ValueError, TypeError):
+        pass
+    return None
+
+
+def effective_intervals(conn, wrong_question_id):
+    """错题的实际复习间隔：单题覆盖优先，否则全局默认。返回天数数组。"""
+    q = conn.execute(
+        'SELECT review_intervals FROM wrong_questions WHERE id=?',
+        (wrong_question_id,)).fetchone()
+    if q:
+        iv = parse_intervals(q['review_intervals'])
+        if iv:
+            return iv
+    return get_review_config(conn)
+
+
+def backfill_review_schedules(conn):
+    """回填所有「已确认但无复习排期」的错题，消除「未排期」状态（幂等）。
+    返回本次回填的错题数。"""
+    orphan = conn.execute(
+        "SELECT wq.id FROM wrong_questions wq "
+        "LEFT JOIN review_schedules s ON s.wrong_question_id = wq.id "
+        "WHERE wq.status='confirmed' AND s.id IS NULL").fetchall()
+    n = 0
+    for wq in orphan:
+        schedule_initial_review(conn, wq['id'])
+        n += 1
+    return n
 
 
 _HAN_RE = re.compile(r'[\u4e00-\u9fff]+')
@@ -184,10 +237,11 @@ def auto_pinyin_questions(conn, questions, subject):
     return questions
 
 
-def schedule_initial_review(conn, wrong_question_id, subject):
-    """错题首次入库：建一个 schedule，next_review_date = 今天 + intervals[0]"""
-    rule = get_review_rule(conn, subject)
-    first = rule['intervals'][0] if rule['intervals'] else 2
+def schedule_initial_review(conn, wrong_question_id, subject=None):
+    """错题首次入库：建一个 schedule，next_review_date = 今天 + intervals[0]。
+    V1.31 起用 effective_intervals（单题覆盖优先，否则全局默认）。INSERT OR REPLACE 幂等。"""
+    intervals = effective_intervals(conn, wrong_question_id)
+    first = intervals[0] if intervals else 2
     next_date = (datetime.now() + timedelta(days=first)).strftime('%Y-%m-%d')
     conn.execute(
         'INSERT OR REPLACE INTO review_schedules '
@@ -198,7 +252,8 @@ def schedule_initial_review(conn, wrong_question_id, subject):
 
 
 def advance_schedule(conn, schedule_id, result):
-    """复习答题后推进：result='correct' → 进入下一阶段或 mastered；'wrong' → 重置回 0"""
+    """复习答题后推进：result='correct' → 进入下一阶段或 mastered；'wrong' → 重置回 0。
+    V1.31 起用 effective_intervals（单题覆盖优先），复习次数 = len(intervals)。"""
     sch = conn.execute(
         'SELECT * FROM review_schedules WHERE id=?', (schedule_id,)).fetchone()
     if not sch:
@@ -207,9 +262,8 @@ def advance_schedule(conn, schedule_id, result):
         'SELECT * FROM wrong_questions WHERE id=?', (sch['wrong_question_id'],)).fetchone()
     if not wq:
         return None
-    ci = conn.execute('SELECT * FROM checkins WHERE id=?', (wq['checkin_id'],)).fetchone()
-    board = conn.execute('SELECT * FROM boards WHERE id=?', (ci['board_id'],)).fetchone()
-    rule = get_review_rule(conn, board['subject'])
+    intervals = effective_intervals(conn, sch['wrong_question_id'])
+    count = len(intervals)
 
     history = json.loads(sch['history'] or '[]')
     history.append({
@@ -221,17 +275,17 @@ def advance_schedule(conn, schedule_id, result):
     if result == 'wrong':
         # 错误：重置回第 0 阶段，间隔从头
         new_stage = 0
-        next_date = (datetime.now() + timedelta(days=rule['intervals'][0])).strftime('%Y-%m-%d')
+        next_date = (datetime.now() + timedelta(days=intervals[0])).strftime('%Y-%m-%d')
         new_status = 'pending'
     else:
         new_stage = sch['current_stage'] + 1
-        if new_stage >= rule['max_stages']:
-            # 全部通过，掌握
+        if new_stage >= count:
+            # 全部通过，掌握（复习完成）
             new_status = 'mastered'
             next_date = None
         else:
             new_status = 'pending'
-            interval = rule['intervals'][new_stage] if new_stage < len(rule['intervals']) else 30
+            interval = intervals[new_stage] if new_stage < count else intervals[-1]
             next_date = (datetime.now() + timedelta(days=interval)).strftime('%Y-%m-%d')
 
     conn.execute(
@@ -2202,7 +2256,7 @@ def api_wrong_questions():
                    r.version,
                    s.id AS schedule_id, s.current_stage, s.next_review_date,
                    s.status AS review_status, s.history AS review_history,
-                   COALESCE(rr.max_stages, 4) AS max_stages
+                   COALESCE(kpu.name, kp.name) AS unit_name
             FROM wrong_questions q
             JOIN checkins c ON q.checkin_id = c.id
             JOIN boards b ON c.board_id = b.id
@@ -2211,7 +2265,8 @@ def api_wrong_questions():
                   FROM ai_runs WHERE status='done' GROUP BY checkin_id) lr
               ON lr.checkin_id = c.id AND lr.mv = r.version
             LEFT JOIN review_schedules s ON s.wrong_question_id = q.id
-            LEFT JOIN review_rules rr ON rr.subject = b.subject
+            LEFT JOIN knowledge_points kp ON kp.id = c.kp_id
+            LEFT JOIN knowledge_points kpu ON kpu.id = kp.parent_id
             WHERE q.status='confirmed'
         '''
         params = []
@@ -2222,22 +2277,35 @@ def api_wrong_questions():
         rows = [row2dict(r) for r in conn.execute(sql, params).fetchall()]
 
         today = db.today_str()
+        global_intervals = get_review_config(conn)
         for it in rows:
             hist = []
             try:
                 hist = json.loads(it.pop('review_history') or '[]')
             except Exception:
                 hist = []
-            it['review_times'] = len(hist)                       # 已复习次数
+            # 复习次数 = 只统计真正答题（correct/wrong），terminate/reopen 不计入
+            it['review_times'] = sum(1 for h in hist if h.get('result') in ('correct', 'wrong'))
             it['wrong_times'] = sum(1 for h in hist if h.get('result') == 'wrong')
+            # 有效间隔与总次数（单题覆盖优先）
+            intervals = None
+            if it.get('review_intervals'):
+                try:
+                    iv = json.loads(it['review_intervals'])
+                    if isinstance(iv, list) and iv:
+                        intervals = [int(x) for x in iv]
+                except (json.JSONDecodeError, ValueError, TypeError):
+                    intervals = None
+            intervals = intervals or global_intervals
+            it['review_intervals'] = intervals
+            it['review_count'] = len(intervals)          # 总复习次数
+            it['unit_name'] = it.get('unit_name') or it.get('subject') or '未归类'
             if it.get('review_status') == 'mastered':
                 it['review_state'] = 'mastered'
             elif it.get('next_review_date') and it['next_review_date'] <= today:
                 it['review_state'] = 'due'
-            elif it.get('next_review_date'):
-                it['review_state'] = 'learning'
             else:
-                it['review_state'] = 'new'
+                it['review_state'] = 'learning'          # 不再有「未排期」
             it['history'] = hist
 
         # 汇总：用于错题本「本阶段错误全景」
@@ -2262,7 +2330,6 @@ def api_wrong_questions():
                 'due': _count(lambda x: x['review_state'] == 'due'),
                 'learning': _count(lambda x: x['review_state'] == 'learning'),
                 'mastered': _count(lambda x: x['review_state'] == 'mastered'),
-                'new': _count(lambda x: x['review_state'] == 'new'),
             },
             'by_error_type': by_error,
             'date_range': [rows[-1]['checkin_date'], rows[0]['checkin_date']] if rows else None,
@@ -2285,7 +2352,7 @@ def api_review_today_done():
             SELECT s.id, s.current_stage, s.next_review_date, s.status, s.history,
                    q.content, q.student_answer, q.correct_answer, q.error_type,
                    q.knowledge_point, q.checkin_id, c.checkin_date, c.board_id,
-                   b.subject, b.name AS board_name
+                   q.review_intervals, b.subject, b.name AS board_name
             FROM review_schedules s
             JOIN wrong_questions q ON s.wrong_question_id = q.id
             JOIN checkins c ON q.checkin_id = c.id
@@ -2297,6 +2364,9 @@ def api_review_today_done():
             ORDER BY s.id DESC LIMIT 50
         ''', (today,)).fetchall()
         items = [row2dict(r) for r in rows]
+        global_intervals = get_review_config(conn)
+        for it in items:
+            it['review_count'] = len(parse_intervals(it.get('review_intervals')) or global_intervals)
         for it in items:
             it['history'] = json.loads(it['history'] or '[]')
             # 提取今天那条记录
@@ -2316,7 +2386,7 @@ def api_review_today():
         today = db.today_str()
         sql = '''
             SELECT s.*, q.content, q.student_answer, q.correct_answer, q.error_type,
-                   q.knowledge_point, q.confidence, q.checkin_id,
+                   q.knowledge_point, q.confidence, q.checkin_id, q.review_intervals,
                    c.checkin_date, c.board_id, b.subject, b.name AS board_name, b.track_mode
             FROM review_schedules s
             JOIN wrong_questions q ON s.wrong_question_id = q.id
@@ -2330,8 +2400,10 @@ def api_review_today():
             params.append(subject)
         sql += ' ORDER BY s.next_review_date ASC, q.id ASC LIMIT 200'
         items = [row2dict(r) for r in conn.execute(sql, params).fetchall()]
+        global_intervals = get_review_config(conn)
         for it in items:
             it['history'] = json.loads(it['history'] or '[]')
+            it['review_count'] = len(parse_intervals(it.get('review_intervals')) or global_intervals)
             it['overdue_days'] = (
                 (datetime.now() - datetime.strptime(it['next_review_date'], '%Y-%m-%d')).days
             )
@@ -2348,7 +2420,7 @@ def api_review_mastered():
     try:
         sql = '''
             SELECT s.*, q.content, q.student_answer, q.correct_answer, q.error_type,
-                   q.knowledge_point, q.checkin_date, c.board_id,
+                   q.knowledge_point, q.checkin_date, c.board_id, q.review_intervals,
                    b.subject, b.name AS board_name
             FROM review_schedules s
             JOIN wrong_questions q ON s.wrong_question_id = q.id
@@ -2362,8 +2434,10 @@ def api_review_mastered():
             params.append(subject)
         sql += ' ORDER BY s.id DESC LIMIT 200'
         items = [row2dict(r) for r in conn.execute(sql, params).fetchall()]
+        global_intervals = get_review_config(conn)
         for it in items:
             it['history'] = json.loads(it['history'] or '[]')
+            it['review_count'] = len(parse_intervals(it.get('review_intervals')) or global_intervals)
         return jsonify({'ok': True, 'items': items})
     finally:
         conn.close()
@@ -2417,20 +2491,18 @@ def api_review_undo(rid):
         history.pop()
         wq = conn.execute(
             'SELECT * FROM wrong_questions WHERE id=?', (sch['wrong_question_id'],)).fetchone()
-        ci = conn.execute('SELECT * FROM checkins WHERE id=?', (wq['checkin_id'],)).fetchone()
-        board = conn.execute('SELECT * FROM boards WHERE id=?', (ci['board_id'],)).fetchone()
-        rule = get_review_rule(conn, board['subject'])
+        intervals = effective_intervals(conn, sch['wrong_question_id'])
+        count = len(intervals)
 
         # 还原：撤销后回到上一次的"未答题"状态
         # 取 history 倒数第二条的 stage 作为 current_stage，没有则 0
         prev_stage = history[-1]['stage'] - 1 if history else 0
         if prev_stage < 0: prev_stage = 0
-        if prev_stage >= rule['max_stages']:
+        if prev_stage >= count:
             new_status, next_date = 'mastered', None
         else:
             new_status = 'pending'
-            intervals = rule['intervals']
-            interval = intervals[prev_stage] if prev_stage < len(intervals) else 30
+            interval = intervals[prev_stage] if prev_stage < count else intervals[-1]
             next_date = (datetime.now() + timedelta(days=interval)).strftime('%Y-%m-%d')
         conn.execute(
             'UPDATE review_schedules SET current_stage=?, next_review_date=?, history=?, status=? WHERE id=?',
@@ -2483,6 +2555,164 @@ def api_review_stats():
         conn.close()
 
 
+# ---------------- 复习配置（V1.31） ----------------
+
+@app.route('/api/review/config', methods=['GET'])
+def api_review_config():
+    """全局默认复习配置：次数 + 间隔 + 可选档位"""
+    conn = db.get_conn()
+    try:
+        intervals = get_review_config(conn)
+        return jsonify({
+            'ok': True,
+            'intervals': intervals,
+            'count': len(intervals),
+            'choices': db.REVIEW_INTERVAL_CHOICES,
+        })
+    finally:
+        conn.close()
+
+
+@app.route('/api/review/config', methods=['PUT'])
+def api_review_config_update():
+    """更新全局默认复习间隔（长度=复习次数，1-4，每值须在档位内）"""
+    data = request.get_json() or {}
+    intervals = data.get('intervals')
+    err = _validate_intervals(intervals)
+    if err:
+        return jsonify({'ok': False, 'error': err}), 400
+    conn = db.get_conn()
+    try:
+        conn.execute(
+            'INSERT INTO review_config (id, intervals, updated_at) VALUES (1, ?, ?) '
+            'ON CONFLICT(id) DO UPDATE SET intervals=excluded.intervals, updated_at=excluded.updated_at',
+            (json.dumps([int(x) for x in intervals]), db.now_str()))
+        conn.commit()
+        return jsonify({'ok': True, 'intervals': [int(x) for x in intervals],
+                        'count': len(intervals)})
+    finally:
+        conn.close()
+
+
+@app.route('/api/question/<int:qid>/review-config', methods=['GET'])
+def api_question_review_config(qid):
+    """某错题的有效复习间隔 + 是否单题覆盖"""
+    conn = db.get_conn()
+    try:
+        q = conn.execute('SELECT * FROM wrong_questions WHERE id=?', (qid,)).fetchone()
+        if not q:
+            return jsonify({'ok': False, 'error': 'not found'}), 404
+        intervals = effective_intervals(conn, qid)
+        override = None
+        if q['review_intervals']:
+            try:
+                iv = json.loads(q['review_intervals'])
+                if isinstance(iv, list) and iv:
+                    override = [int(x) for x in iv]
+            except (json.JSONDecodeError, ValueError, TypeError):
+                override = None
+        return jsonify({'ok': True, 'intervals': intervals, 'count': len(intervals),
+                        'override': override,
+                        'choices': db.REVIEW_INTERVAL_CHOICES})
+    finally:
+        conn.close()
+
+
+@app.route('/api/question/<int:qid>/review-config', methods=['PUT'])
+def api_question_review_config_update(qid):
+    """设置/清除单题复习间隔覆盖。intervals=null 表示恢复全局默认。"""
+    data = request.get_json() or {}
+    intervals = data.get('intervals')
+    conn = db.get_conn()
+    try:
+        q = conn.execute('SELECT * FROM wrong_questions WHERE id=?', (qid,)).fetchone()
+        if not q:
+            return jsonify({'ok': False, 'error': 'not found'}), 404
+        if intervals is None:
+            conn.execute("UPDATE wrong_questions SET review_intervals=NULL WHERE id=?", (qid,))
+        else:
+            err = _validate_intervals(intervals)
+            if err:
+                return jsonify({'ok': False, 'error': err}), 400
+            conn.execute("UPDATE wrong_questions SET review_intervals=? WHERE id=?",
+                         (json.dumps([int(x) for x in intervals]), qid))
+        conn.commit()
+        return jsonify({'ok': True,
+                        'intervals': effective_intervals(conn, qid),
+                        'count': len(effective_intervals(conn, qid))})
+    finally:
+        conn.close()
+
+
+def _validate_intervals(intervals):
+    if not isinstance(intervals, list) or not intervals:
+        return 'intervals 必须是非空数组'
+    if len(intervals) > 4:
+        return '复习次数最多 4 次'
+    try:
+        vals = [int(x) for x in intervals]
+    except (TypeError, ValueError):
+        return '间隔必须是数字'
+    for v in vals:
+        if v not in db.REVIEW_INTERVAL_CHOICES:
+            return f'间隔 {v} 不在可选档位内'
+    return None
+
+
+@app.route('/api/review/<int:rid>/terminate', methods=['POST'])
+def api_review_terminate(rid):
+    """终止复习：直接把错题置为「复习完成」（可逆，错题本可重新入复习）"""
+    data = request.get_json() or {}
+    member = data.get('member_id') or 'dad'
+    conn = db.get_conn()
+    try:
+        sch = conn.execute('SELECT * FROM review_schedules WHERE id=?', (rid,)).fetchone()
+        if not sch:
+            return jsonify({'ok': False, 'error': 'not found'}), 404
+        history = json.loads(sch['history'] or '[]')
+        history.append({'date': db.today_str(), 'result': 'terminated',
+                        'stage': sch['current_stage']})
+        conn.execute(
+            "UPDATE review_schedules SET status='mastered', history=?, next_review_date=NULL WHERE id=?",
+            (json.dumps(history, ensure_ascii=False), rid))
+        wq = conn.execute('SELECT * FROM wrong_questions WHERE id=?',
+                          (sch['wrong_question_id'],)).fetchone()
+        if wq:
+            log_action(conn, wq['checkin_id'], None, member, 'review_terminate', '终止复习')
+        conn.commit()
+        return jsonify({'ok': True, 'new_status': 'mastered'})
+    finally:
+        conn.close()
+
+
+@app.route('/api/review/<int:rid>/reopen', methods=['POST'])
+def api_review_reopen(rid):
+    """重新入复习：把「复习完成」的错题重置为复习中（stage 0，间隔从头）"""
+    data = request.get_json() or {}
+    member = data.get('member_id') or 'dad'
+    conn = db.get_conn()
+    try:
+        sch = conn.execute('SELECT * FROM review_schedules WHERE id=?', (rid,)).fetchone()
+        if not sch:
+            return jsonify({'ok': False, 'error': 'not found'}), 404
+        intervals = effective_intervals(conn, sch['wrong_question_id'])
+        first = intervals[0] if intervals else 2
+        next_date = (datetime.now() + timedelta(days=first)).strftime('%Y-%m-%d')
+        history = json.loads(sch['history'] or '[]')
+        history.append({'date': db.today_str(), 'result': 'reopen', 'stage': 0})
+        conn.execute(
+            "UPDATE review_schedules SET status='pending', current_stage=0, next_review_date=?, history=? WHERE id=?",
+            (next_date, json.dumps(history, ensure_ascii=False), rid))
+        wq = conn.execute('SELECT * FROM wrong_questions WHERE id=?',
+                          (sch['wrong_question_id'],)).fetchone()
+        if wq:
+            log_action(conn, wq['checkin_id'], None, member, 'review_reopen', '重新入复习')
+        conn.commit()
+        return jsonify({'ok': True, 'new_status': 'pending', 'next_review_date': next_date})
+    finally:
+        conn.close()
+
+
 @app.route('/api/persist')
 def api_persist():
     """数据持久化护盾状态：deploy 后能否自动恢复数据，一眼可查。"""
@@ -2496,6 +2726,16 @@ def api_persist():
 
 if __name__ == '__main__':
     db.init_db()
+    # V1.31：回填已确认但无排期的错题，消除「未排期」
+    try:
+        _bc = db.get_conn()
+        _n = backfill_review_schedules(_bc)
+        _bc.commit()
+        _bc.close()
+        if _n:
+            print(f'[V1.31] backfilled {_n} review schedules')
+    except Exception:
+        pass
     # 数据有变化就自动快照，保证 deploy 前持久化副本足够新
     try:
         persist.start_auto_snapshot(INSTANCE_DIR, interval=90)

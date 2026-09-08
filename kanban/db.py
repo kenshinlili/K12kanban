@@ -1,5 +1,6 @@
 """学习看板 - 数据库层（SQLite）"""
 import sqlite3
+import json
 import os
 from datetime import datetime
 
@@ -99,7 +100,8 @@ CREATE TABLE IF NOT EXISTS wrong_questions (
   review_comment TEXT,
   reviewer_id TEXT,
   reviewed_at TEXT,
-  sort_order INTEGER DEFAULT 0
+  sort_order INTEGER DEFAULT 0,
+  review_intervals TEXT                 -- 单题覆盖复习间隔（JSON 天数数组），空=用全局
 );
 
 CREATE TABLE IF NOT EXISTS review_actions (
@@ -118,7 +120,7 @@ CREATE TABLE IF NOT EXISTS review_schedules (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   wrong_question_id INTEGER NOT NULL,
   current_stage INTEGER DEFAULT 0,      -- 0=待复习 1/2/3/4 已通过的次数
-  next_review_date TEXT NOT NULL,       -- 下次复习日期 YYYY-MM-DD
+  next_review_date TEXT,                -- 下次复习日期 YYYY-MM-DD；mastered/终止复习时为空
   history TEXT,                         -- JSON: [{date, result, stage}]
   status TEXT DEFAULT 'pending',        -- pending / mastered / dropped
   created_at TEXT,
@@ -130,6 +132,14 @@ CREATE TABLE IF NOT EXISTS review_rules (
   subject TEXT PRIMARY KEY,
   intervals TEXT NOT NULL,              -- JSON: [2,7,30,30]
   max_stages INTEGER NOT NULL           -- 通过多少次算掌握
+);
+
+-- 复习全局默认配置（单行，V1.31）：取代 review_rules 成为唯一默认
+-- intervals = 天数数组，长度即复习次数（默认 [2,7,28] = 第2天/第1周/第4周）
+CREATE TABLE IF NOT EXISTS review_config (
+  id INTEGER PRIMARY KEY CHECK (id=1),
+  intervals TEXT NOT NULL,
+  updated_at TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_checkins_board_date ON checkins(board_id, checkin_date);
@@ -152,6 +162,20 @@ REVIEW_RULES = [
     ('数学', '[1,30]', 2),         # 数学只重复 2 次，间隔长
     ('英语', '[2,7,30,30]', 4),
 ]
+
+# V1.31：复习间隔可选档位（天数），展示时转中文
+REVIEW_INTERVAL_CHOICES = [2, 7, 14, 21, 28, 56]
+# 默认复习次数=3，间隔=第2天/第1周/第4周
+DEFAULT_REVIEW_INTERVALS = [2, 7, 28]
+
+def interval_label(days):
+    """把天数转成中文档位：2→第2天，7→第1周，14→第2周……"""
+    if days <= 2:
+        return f'第{days}天'
+    weeks = days // 7
+    if days % 7 == 0:
+        return f'第{weeks}周'
+    return f'{days}天'
 
 BOARDS = [
     # 语文：V1.30 看板只保留校内主三卡，学而思体系归档隐藏
@@ -248,6 +272,37 @@ def migrate_db(conn):
     cols = [r['name'] for r in conn.execute('PRAGMA table_info(wrong_questions)').fetchall()]
     if 'answer_candidates' not in cols:
         conn.execute("ALTER TABLE wrong_questions ADD COLUMN answer_candidates TEXT")
+    # V1.31：wrong_questions 加 review_intervals（单题覆盖复习间隔）
+    if 'review_intervals' not in cols:
+        conn.execute("ALTER TABLE wrong_questions ADD COLUMN review_intervals TEXT")
+
+    # V1.31：review_config 单行默认（第2天/第1周/第4周 = 3 次），幂等
+    conn.execute(
+        "INSERT OR IGNORE INTO review_config (id, intervals, updated_at) "
+        "VALUES (1, ?, ?)", (json.dumps(DEFAULT_REVIEW_INTERVALS), now_str()))
+
+    # V1.31：review_schedules.next_review_date 允许 NULL（mastered/终止复习时置空）
+    _rs = {r['name']: r['notnull'] for r in conn.execute('PRAGMA table_info(review_schedules)').fetchall()}
+    if _rs.get('next_review_date'):
+        conn.execute('ALTER TABLE review_schedules RENAME TO review_schedules_old')
+        conn.execute('''CREATE TABLE review_schedules (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          wrong_question_id INTEGER NOT NULL,
+          current_stage INTEGER DEFAULT 0,
+          next_review_date TEXT,
+          history TEXT,
+          status TEXT DEFAULT 'pending',
+          created_at TEXT,
+          UNIQUE(wrong_question_id)
+        )''')
+        conn.execute('INSERT INTO review_schedules (id, wrong_question_id, current_stage, next_review_date, history, status, created_at) '
+                     'SELECT id, wrong_question_id, current_stage, next_review_date, history, status, created_at FROM review_schedules_old')
+        conn.execute('DROP TABLE review_schedules_old')
+        _mx = conn.execute('SELECT COALESCE(MAX(id),0) AS m FROM review_schedules').fetchone()['m']
+        conn.execute("DELETE FROM sqlite_sequence WHERE name='review_schedules'")
+        conn.execute("INSERT INTO sqlite_sequence (name, seq) VALUES ('review_schedules', ?)", (_mx,))
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_schedule_date ON review_schedules(next_review_date, status)')
+
 
     # 2. knowledge_points 加 parent_id（两级结构）
     kp_cols = [r['name'] for r in conn.execute('PRAGMA table_info(knowledge_points)').fetchall()]

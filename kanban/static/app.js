@@ -44,6 +44,14 @@ async function del(url) {
   const r = await fetch(API + url, { method: 'DELETE' });
   return r.json();
 }
+async function put(url, body) {
+  const r = await fetch(API + url, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body || {}),
+  });
+  return r.json();
+}
 function todayStr() {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
@@ -807,21 +815,24 @@ function openPrintQueueModal() {
 async function renderReview() {
   const container = document.getElementById('view-review');
   const badge = document.getElementById('reviewBadge');
-  const [statsR, dueR, doneR] = await Promise.all([
+  const [statsR, dueR, doneR, configR] = await Promise.all([
     get('/review/stats'),
     get('/review/today'),
     get('/review/today-done'),
+    get('/review/config'),
   ]);
   if (!statsR.ok || !dueR.ok) return;
   const stats = statsR;
   const due = dueR.items;
   const done = doneR.items || [];
+  const config = (configR.ok ? configR : { intervals: [2, 7, 28], count: 3, choices: [2, 7, 14, 21, 28, 56] });
+  window.__reviewConfig = config;
   // 打印按钮要按 id 反查完整题目对象（content 等），缓存本次渲染的列表
   REVIEW_ITEMS_CACHE = (due || []).concat(done || []);
   badge.textContent = stats.due;
   badge.classList.toggle('zero', stats.due === 0);
 
-  let html = `<div class="review-stats">
+  let html = renderReviewConfigBar(config) + `<div class="review-stats">
     <div class="stat-card">
       <div class="stat-num due">${stats.due}</div>
       <div class="stat-label">📅 今日待复习</div>
@@ -872,11 +883,98 @@ async function renderReview() {
 
   container.innerHTML = html;
   bindReviewEvents();
+  bindReviewConfig();
+}
+
+const REVIEW_CHOICES = [2, 7, 14, 21, 28, 56];
+const DEFAULT_BY_COUNT = { 1: [28], 2: [2, 7], 3: [2, 7, 28], 4: [2, 7, 28, 56] };
+
+function renderReviewConfigBar(config) {
+  const intervals = config.intervals || [2, 7, 28];
+  const count = intervals.length;
+  return `<div class="review-config-bar">
+    <div class="rc-summary">
+      <b>复习设置</b>：默认 <b>${count} 次</b> ·
+      间隔 ${intervals.map(intervalLabel).join(' → ')}
+    </div>
+    <button class="btn btn-sm" id="btnToggleReviewConfig">⚙ 修改</button>
+    <div id="reviewConfigEdit" style="display:none;margin-top:10px"></div>
+  </div>`;
+}
+
+function bindReviewConfig() {
+  const toggle = document.getElementById('btnToggleReviewConfig');
+  const editBox = document.getElementById('reviewConfigEdit');
+  if (!toggle || !editBox) return;
+  toggle.onclick = () => {
+    const show = editBox.style.display === 'none';
+    editBox.style.display = show ? 'block' : 'none';
+    toggle.textContent = show ? '✕ 收起' : '⚙ 修改';
+    if (show) renderReviewConfigEditor(editBox);
+  };
+}
+
+function renderReviewConfigEditor(box) {
+  // 用当前全局配置初始化编辑态
+  let cur = { intervals: [2, 7, 28] };
+  const r = window.__reviewConfig;
+  if (r && r.intervals) cur.intervals = r.intervals.slice();
+  const count = cur.intervals.length;
+
+  const countSel = `<select id="rcCount" style="padding:4px 8px;border-radius:6px">
+    ${[1, 2, 3, 4].map(n => `<option value="${n}" ${n === count ? 'selected' : ''}>${n} 次</option>`).join('')}
+  </select>`;
+
+  box.innerHTML = `<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+      <span>复习次数</span>${countSel}
+      <span style="margin-left:8px">每次间隔</span>
+      <span id="rcSlots" style="display:flex;gap:6px;flex-wrap:wrap"></span>
+      <button class="btn btn-primary btn-sm" id="btnSaveReviewConfig">💾 保存</button>
+    </div>
+    <div style="font-size:12px;color:var(--text-soft);margin-top:8px">
+      间隔档位：第2天 / 第1周 / 第2周 / 第3周 / 第4周 / 第8周。改次数会自动套默认间隔，可再手动调。
+    </div>`;
+
+  function slotOptions(sel) {
+    return REVIEW_CHOICES.map(d =>
+      `<option value="${d}" ${d === sel ? 'selected' : ''}>${intervalLabel(d)}</option>`).join('');
+  }
+
+  function renderSlots() {
+    const n = parseInt(document.getElementById('rcCount').value, 10);
+    const slots = document.getElementById('rcSlots');
+    // 若次数变了，按默认映射自动填充
+    let vals = cur.intervals.slice(0, n);
+    if (vals.length < n) {
+      const defaults = DEFAULT_BY_COUNT[n] || [2, 7, 28];
+      vals = defaults.slice();
+    }
+    cur.intervals = vals;
+    slots.innerHTML = vals.map((v, i) =>
+      `<select data-rcslot="${i}" style="padding:4px 8px;border-radius:6px">${slotOptions(v)}</select>`).join('');
+    slots.querySelectorAll('[data-rcslot]').forEach(s => {
+      s.onchange = () => {
+        cur.intervals[parseInt(s.dataset.rcslot, 10)] = parseInt(s.value, 10);
+      };
+    });
+  }
+
+  document.getElementById('rcCount').onchange = renderSlots;
+  renderSlots();
+
+  document.getElementById('btnSaveReviewConfig').onclick = async () => {
+    const intervals = cur.intervals.map(Number);
+    const r = await put('/review/config', { intervals });
+    if (!r.ok) { toast(r.error || '保存失败'); return; }
+    toast('✓ 复习设置已更新');
+    await renderReview();
+  };
 }
 
 function reviewDoneCard(r) {
   const stageDots = [];
-  for (let i = 0; i < 4; i++) {
+  const total = r.review_count || 4;
+  for (let i = 0; i < total; i++) {
     stageDots.push(`<span class="stage-dot ${i < r.current_stage ? 'done' : ''}"></span>`);
   }
   // 找今天最后一条记录的结果
@@ -916,8 +1014,9 @@ function reviewDoneCard(r) {
 
 function reviewCard(r) {
   const overdue = r.overdue_days > 0;
+  const total = r.review_count || 4;
   const stageDots = [];
-  for (let i = 0; i < 4; i++) {
+  for (let i = 0; i < total; i++) {
     stageDots.push(`<span class="stage-dot ${i < r.current_stage ? 'done' : ''}"></span>`);
   }
   const historyHtml = (r.history || []).map(h =>
@@ -927,7 +1026,7 @@ function reviewCard(r) {
     <div class="review-stage">
       <span>${r.subject} · ${esc(r.board_name)}</span>
       <span class="stage-dots">${stageDots.join('')}</span>
-      <span style="margin-left:auto">第 ${r.current_stage + 1} 次复习</span>
+      <span style="margin-left:auto">第 ${r.current_stage + 1} / ${total} 次复习</span>
     </div>
     <div class="review-content">${formatAnswer(r.content)}</div>
     <div class="review-meta">
@@ -942,6 +1041,7 @@ function reviewCard(r) {
       <button class="btn btn-danger btn-sm" data-review="wrong" data-rid="${r.id}">✗ 答错了</button>
       <button class="btn btn-sm" data-answer="${r.id}" title="展开/收起这题的答案">👁 看答案</button>
       <button class="btn btn-sm" data-printq="${r.id}" data-wq="${r.wrong_question_id}" title="把这题加入「打印列表」。加完可在右下角浮动按钮一键按学科排版打印。同一题再点会从列表移除。">📋 加入打印列表</button>
+      <button class="btn btn-sm" data-terminate="${r.id}" title="不再复习这题，直接记为「复习完成」（可在错题本里重新入复习）">⏹ 终止复习</button>
     </div>
     <div class="review-answer" id="rwa-${r.id}" style="display:none">
       <div>上次错答：<span class="wrong">${formatAnswer(r.student_answer)}</span></div>
@@ -989,6 +1089,19 @@ function bindReviewEvents() {
     };
   });
 
+  // 终止复习（V1.31）：直接记为「复习完成」，可在错题本重新入复习
+  document.querySelectorAll('[data-terminate]').forEach(btn => {
+    btn.onclick = async () => {
+      const rid = btn.dataset.terminate;
+      if (!confirm('确定终止这题的复习？\n将直接记为「复习完成」，之后可在错题本里重新入复习。')) return;
+      const r = await post(`/review/${rid}/terminate`, { member_id: STATE.member });
+      if (!r.ok) { toast(r.error || '终止失败'); return; }
+      toast('⏹ 已终止复习，记为「复习完成」');
+      await loadState();
+      renderReview();
+    };
+  });
+
   // 「加入打印列表」（复习板块）：点一下加入队列，再点同一题会从队列移除（toggle）
   document.querySelectorAll('[data-printq]').forEach(btn => {
     btn.onclick = () => {
@@ -1010,12 +1123,19 @@ function formatAnswer(text) {
 }
 
 const REVIEW_STATE_TEXT = {
-  due: '待复习', learning: '复习中', mastered: '已掌握', new: '未排期',
+  due: '待复习', learning: '复习中', mastered: '复习完成',
 };
 const REVIEW_STATE_CLASS = {
   due: 'sp-rerun_requested', learning: 'sp-pending_ai',
-  mastered: 'sp-confirmed', new: 'sp-skipped',
+  mastered: 'sp-confirmed',
 };
+
+// 间隔天数 → 中文档位（第2天 / 第1周 / ...）
+function intervalLabel(days) {
+  if (days <= 2) return `第${days}天`;
+  if (days % 7 === 0) return `第${days / 7}周`;
+  return `${days}天`;
+}
 
 async function renderWrongbook() {
   const container = document.getElementById('view-wrongbook');
@@ -1038,23 +1158,51 @@ async function renderWrongbook() {
     <div class="stat-card"><div class="stat-num mastered">${st.mastered || 0}</div><div class="stat-label">已掌握</div></div>
   </div>`;
 
-  // 按科目 × 知识点（单元）归类
-  if (s.by_knowledge_point) {
-    html += `<div class="wb-section-title">按单元 / 知识点归类</div><div class="wb-group">`;
-    Object.keys(s.by_knowledge_point).forEach(sub => {
-      const kps = s.by_knowledge_point[sub];
-      const total = Object.values(kps).reduce((a, b) => a + b, 0);
-      html += `<div class="wb-kp-card">
-        <div class="wb-kp-head"><span class="dot ${SUBJECT_CLASS[sub]}"></span>
-          <b>${esc(sub)}</b><span class="wb-kp-count">${total} 题</span></div>
-        <div class="wb-kp-list">`;
-      Object.entries(kps).sort((a, b) => b[1] - a[1]).forEach(([kp, n]) => {
-        html += `<button class="kp-chip" data-wbkp="${esc(kp)}">${esc(kp)} <span class="kp-n">${n}</span></button>`;
+  // ---- 错题目录树（顶层年级/学科 → 单元 → 课程，可收起）----
+  const SUBJECT_TOP_LABEL = { '语文': '四年级上册' };
+  const treeTop = {};
+  items.forEach(it => {
+    const top = it.subject;
+    const unit = it.unit_name || '未归类';
+    const lesson = it.knowledge_point || '未归类';
+    treeTop[top] = treeTop[top] || {};
+    treeTop[top][unit] = treeTop[top][unit] || {};
+    treeTop[top][unit][lesson] = treeTop[top][unit][lesson] || [];
+    treeTop[top][unit][lesson].push(it);
+  });
+  html += `<div class="wb-section-title">📁 错题目录（点击标题收起 / 展开）</div><div class="wb-tree">`;
+  Object.keys(treeTop).forEach(sub => {
+    const topLabel = SUBJECT_TOP_LABEL[sub] || sub;
+    const units = treeTop[sub];
+    let topTotal = 0;
+    Object.values(units).forEach(u => { topTotal += Object.keys(u).length; });
+    html += `<div class="wb-top-node" data-sub="${esc(sub)}">
+      <div class="wb-top-head" data-wbtop="${esc(sub)}">
+        <span class="kp-toggle">▼</span>
+        <span class="dot ${SUBJECT_CLASS[sub]}"></span>
+        <b>${esc(topLabel)}</b>
+        <span class="wb-kp-count">${topTotal} 题</span>
+      </div>
+      <div class="wb-top-children">`;
+    Object.keys(units).forEach(unit => {
+      const lessons = units[unit];
+      const unitTotal = Object.keys(lessons).length;
+      html += `<div class="wb-unit-node">
+        <div class="wb-unit-head" data-wbunit="${esc(sub)}|${esc(unit)}">
+          <span class="kp-toggle">▼</span>
+          <span class="wb-unit-name">${esc(unit)}</span>
+          <span class="wb-kp-count">${unitTotal} 题</span>
+        </div>
+        <div class="wb-unit-children">`;
+      Object.keys(lessons).forEach(lesson => {
+        const n = lessons[lesson].length;
+        html += `<button class="kp-chip" data-wbkp="${esc(lesson)}">${esc(lesson)} <span class="kp-n">${n}</span></button>`;
       });
       html += `</div></div>`;
     });
-    html += `</div>`;
-  }
+    html += `</div></div>`;
+  });
+  html += `</div>`;
 
   // 错误类型分布
   if (s.by_error_type && Object.keys(s.by_error_type).length) {
@@ -1084,6 +1232,26 @@ async function renderWrongbook() {
   </div><div id="wbList"></div>`;
   container.innerHTML = html;
 
+  // 目录树收起 / 展开
+  container.querySelectorAll('[data-wbtop]').forEach(head => {
+    head.onclick = () => {
+      const node = head.parentElement;
+      const children = node.querySelector(':scope > .wb-top-children');
+      const collapsed = node.classList.toggle('collapsed');
+      head.querySelector('.kp-toggle').textContent = collapsed ? '▶' : '▼';
+      if (children) children.style.display = collapsed ? 'none' : '';
+    };
+  });
+  container.querySelectorAll('[data-wbunit]').forEach(head => {
+    head.onclick = () => {
+      const node = head.parentElement;
+      const children = node.querySelector(':scope > .wb-unit-children');
+      const collapsed = node.classList.toggle('collapsed');
+      head.querySelector('.kp-toggle').textContent = collapsed ? '▶' : '▼';
+      if (children) children.style.display = collapsed ? 'none' : '';
+    };
+  });
+
   const list = document.getElementById('wbList');
   let fSub = 'all', fState = 'all', fKp = null;
 
@@ -1109,12 +1277,28 @@ async function renderWrongbook() {
           ${q.error_type ? `<span class="tag">${esc(q.error_type)}</span>` : ''}
           ${q.knowledge_point ? `<span class="tag unit">${esc(q.knowledge_point)}</span>` : ''}
           <span class="status-pill ${REVIEW_STATE_CLASS[q.review_state] || ''}">${REVIEW_STATE_TEXT[q.review_state] || ''}</span>
-          ${q.review_times ? `<span class="tag">复习 ${q.review_times} 次${q.wrong_times ? ` · 又错 ${q.wrong_times} 次` : ''}</span>` : ''}
+          ${q.review_times ? `<span class="tag">复习 ${q.review_times}/${q.review_count} 次${q.wrong_times ? ` · 又错 ${q.wrong_times} 次` : ''}</span>` : ''}
+        </div>
+        <div class="wb-actions" style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
+          ${q.schedule_id ? `<button class="btn btn-sm" data-wb-config="${q.id}" data-rid="${q.schedule_id}">⚙ 复习设置</button>` : ''}
+          ${q.review_state === 'mastered' && q.schedule_id ? `<button class="btn btn-sm" data-wb-reopen="${q.schedule_id}">↩ 重新入复习</button>` : ''}
         </div>
       </div>`).join('')
       : `<div class="empty" style="padding:22px"><div>没有符合条件的错题</div></div>`);
     const clr = document.getElementById('wbClearKp');
     if (clr) clr.onclick = () => { fKp = null; show(); };
+    list.querySelectorAll('[data-wb-reopen]').forEach(btn => {
+      btn.onclick = async () => {
+        if (!confirm('重新入复习？\n这题将从头开始复习周期（第 1 次 → …）。')) return;
+        const r = await post(`/review/${btn.dataset.wbReopen}/reopen`, { member_id: STATE.member });
+        if (!r.ok) { toast(r.error || '操作失败'); return; }
+        toast('↩ 已重新入复习');
+        renderWrongbook();
+      };
+    });
+    list.querySelectorAll('[data-wb-config]').forEach(btn => {
+      btn.onclick = () => openQuestionReviewConfig(btn.dataset.wbConfig, btn.dataset.rid);
+    });
   }
   show();
 
@@ -1130,6 +1314,69 @@ async function renderWrongbook() {
     fKp = b.dataset.wbkp; show();
     document.getElementById('wbList').scrollIntoView({ behavior: 'smooth', block: 'start' });
   });
+}
+
+async function openQuestionReviewConfig(qid, rid) {
+  const d = await get(`/question/${qid}/review-config`);
+  if (!d.ok) { toast(d.error || '读取失败'); return; }
+  let cur = (d.override && d.override.length ? d.override.slice() : (d.intervals || [2, 7, 28]).slice());
+
+  const mask = document.createElement('div');
+  mask.className = 'modal-mask show';
+  mask.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:999;display:flex;align-items:center;justify-content:center';
+  mask.innerHTML = `<div style="background:#fff;border-radius:12px;padding:18px;width:min(92vw,460px);max-height:80vh;overflow:auto">
+    <h3 style="margin:0 0 4px">⚙ 单题复习设置</h3>
+    <div style="font-size:12px;color:var(--text-soft);margin-bottom:12px">只影响这一题，不影响全局默认。</div>
+    <div id="qrcBody"></div>
+  </div>`;
+  document.body.appendChild(mask);
+  mask.onclick = (e) => { if (e.target === mask) mask.remove(); };
+
+  const body = mask.querySelector('#qrcBody');
+  body.innerHTML = `<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+      <span>复习次数</span>
+      <select id="qrcCount" style="padding:4px 8px;border-radius:6px">${[1, 2, 3, 4].map(n => `<option value="${n}" ${n === cur.length ? 'selected' : ''}>${n} 次</option>`).join('')}</select>
+      <span style="margin-left:8px">每次间隔</span>
+      <span id="qrcSlots" style="display:flex;gap:6px;flex-wrap:wrap"></span>
+    </div>
+    <div style="margin-top:14px;display:flex;gap:8px;justify-content:flex-end">
+      <button class="btn btn-sm" id="qrcReset">恢复全局默认</button>
+      <button class="btn btn-sm" id="qrcCancel">取消</button>
+      <button class="btn btn-primary btn-sm" id="qrcSave">💾 保存</button>
+    </div>`;
+
+  const slotOptions = (sel) =>
+    REVIEW_CHOICES.map(d => `<option value="${d}" ${d === sel ? 'selected' : ''}>${intervalLabel(d)}</option>`).join('');
+
+  function renderSlots() {
+    const n = parseInt(body.querySelector('#qrcCount').value, 10);
+    let vals = cur.slice(0, n);
+    if (vals.length < n) vals = (DEFAULT_BY_COUNT[n] || [2, 7, 28]).slice();
+    cur = vals;
+    const slots = body.querySelector('#qrcSlots');
+    slots.innerHTML = vals.map((v, i) => `<select data-slot="${i}" style="padding:4px 8px;border-radius:6px">${slotOptions(v)}</select>`).join('');
+    slots.querySelectorAll('[data-slot]').forEach(s => {
+      s.onchange = () => { cur[parseInt(s.dataset.slot, 10)] = parseInt(s.value, 10); };
+    });
+  }
+  body.querySelector('#qrcCount').onchange = renderSlots;
+  renderSlots();
+
+  body.querySelector('#qrcCancel').onclick = () => mask.remove();
+  body.querySelector('#qrcReset').onclick = async () => {
+    const r = await put(`/question/${qid}/review-config`, { intervals: null });
+    if (!r.ok) { toast(r.error || '重置失败'); return; }
+    toast('✓ 已恢复全局默认');
+    mask.remove();
+    renderWrongbook();
+  };
+  body.querySelector('#qrcSave').onclick = async () => {
+    const r = await put(`/question/${qid}/review-config`, { intervals: cur.map(Number) });
+    if (!r.ok) { toast(r.error || '保存失败'); return; }
+    toast('✓ 单题复习设置已保存');
+    mask.remove();
+    renderWrongbook();
+  };
 }
 
 async function renderKnowledge() {
@@ -1733,14 +1980,14 @@ async function renderDrawer() {
     </div>`;
   }
 
-  /* 板块管理（V1.30：删除/归档必须进抽屉操作） */
+  /* 板块管理（V1.30：隐藏卡片必须进抽屉操作） */
   html += `<div class="section">
     <h3>⚙️ 板块管理</h3>
     <p style="font-size:12px;color:var(--text-soft);margin:0 0 8px">
-      归档后该卡片会从看板隐藏，历史作业和错题仍保留。
+      隐藏后该卡片从看板消失，但卡片下的作业原题与错题数据全部保留，可通过「添加卡片」恢复。
     </p>
     <button class="btn btn-danger btn-sm" id="btnArchiveBoard" style="width:100%">
-      🗑 归档「${esc(b.name)}」卡片
+      🙈 隐藏「${esc(b.name)}」卡片
     </button>
   </div>`;
 
@@ -1929,15 +2176,15 @@ function bindDrawerEvents() {
     };
   });
 
-  /* 归档板块 */
+  /* 隐藏卡片 */
   const btnArchiveBoard = document.getElementById('btnArchiveBoard');
   if (btnArchiveBoard) btnArchiveBoard.onclick = async () => {
     const b = CURRENT_BOARD;
     if (!b) return;
-    if (!confirm(`确定归档「${b.name}」卡片？\n该卡片会从看板隐藏，但历史作业和错题仍保留，之后可通过添加卡片恢复。`)) return;
+    if (!confirm(`确定隐藏「${b.name}」卡片？\n该卡片会从看板消失，但作业原题和错题数据全部保留，之后可通过「添加卡片」恢复。`)) return;
     const r = await del(`/board/${b.id}`);
-    if (!r.ok) { toast(r.error || '归档失败'); return; }
-    toast('已归档卡片');
+    if (!r.ok) { toast(r.error || '隐藏失败'); return; }
+    toast('已隐藏卡片');
     closeDrawer();
     await loadState();
     renderKanban();
