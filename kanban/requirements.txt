@@ -2,4 +2,4 @@
 # 安装：pip install -r requirements.txt
 
 Flask>=2.3.0       # Web 框架（自带 werkzeug，无需单独装）
-pypinyin>=0.49.0   # 语文/英语拼音自动标注
+# V1.34 起不再依赖 pypinyin：识别必须 100% 原文，后端不自动注音

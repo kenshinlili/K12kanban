@@ -40,11 +40,7 @@ import storage
 STORAGE = storage.build_storage(UPLOAD_DIR)
 STORAGE.ensure()
 
-try:
-    from pypinyin import lazy_pinyin, Style
-    HAS_PINYIN = True
-except ImportError:
-    HAS_PINYIN = False
+# V1.34：已移除 pypinyin 自动注音。识别规则：100% 原文，原题里没有的拼音一律不许加。
 
 ALLOWED_EXT = {'png', 'jpg', 'jpeg', 'gif', 'webp', 'heic'}
 
@@ -200,41 +196,6 @@ def backfill_review_schedules(conn):
         schedule_initial_review(conn, wq['id'])
         n += 1
     return n
-
-
-_HAN_RE = re.compile(r'[\u4e00-\u9fff]+')
-
-
-def _attach_pinyin(text):
-    """为字符串中的汉字段自动追加拼音标注，例如「风平浪静」→「风平浪静（fēng píng làng jìng）」。
-    已经带括号拼音的段落不重复处理；非纯汉字（数字/英文/标点）保持原样。"""
-    if not text or not HAS_PINYIN:
-        return text
-    out = []
-    i = 0
-    for m in _HAN_RE.finditer(text):
-        if m.start() > i:
-            out.append(text[i:m.start()])
-        han = m.group()
-        pinyin = ' '.join(lazy_pinyin(han, style=Style.TONE))
-        out.append(f'{han}（{pinyin}）')
-        i = m.end()
-    if i < len(text):
-        out.append(text[i:])
-    return ''.join(out) if out else text
-
-
-def auto_pinyin_questions(conn, questions, subject):
-    """对语文/英语题的 content 字段自动加拼音（如果还没有括号拼音）。
-    注意：correct_answer 不再加拼音——正解只保留答案本身。
-    候选答案（answer_candidates）也不加拼音，是 AI 检索结果，不该被注音。"""
-    if subject not in ('语文', '英语') or not HAS_PINYIN:
-        return questions
-    for q in questions:
-        # content 已有括号拼音则跳过
-        if '（' not in (q.get('content') or ''):
-            q['content'] = _attach_pinyin(q.get('content', ''))
-    return questions
 
 
 def schedule_initial_review(conn, wrong_question_id, subject=None):
@@ -1331,11 +1292,7 @@ def api_ai_result(cid):
         ci = conn.execute('SELECT * FROM checkins WHERE id=?', (cid,)).fetchone()
         if not ci:
             return jsonify({'ok': False, 'error': 'not found'}), 404
-        board = conn.execute('SELECT * FROM boards WHERE id=?', (ci['board_id'],)).fetchone()
-        # 对语文/英语自动补拼音
-        if board:
-            questions = auto_pinyin_questions(conn, questions, board['subject'])
-
+        # V1.34：不再自动补拼音，content 原样入库（100% 原文）
         run = get_or_create_run(conn, cid)
         # 清空该 run 旧错题（同版本重填）
         conn.execute('DELETE FROM wrong_questions WHERE run_id=?', (run['id'],))
