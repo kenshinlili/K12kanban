@@ -814,6 +814,11 @@ body {
 .wb-errtrack i { display: block; height: 100%; background: linear-gradient(90deg, var(--primary), var(--purple)); border-radius: 5px; }
 .wb-errn { width: 22px; text-align: right; font-weight: 700; }
 .wb-sep { width: 1px; height: 20px; background: var(--border); margin: 0 3px; align-self: center; }
+/* V1.32 筛选分层：组名标签（科目 / 状态），明确两层是主筛选与叠加筛选的关系 */
+.wb-flabel {
+  font-size: 11.5px; font-weight: 700; color: var(--text-soft);
+  align-self: center; margin-right: -2px; letter-spacing: .3px;
+}
 .btn.wb-f.on, .btn.wb-s.on { border-color: var(--primary); color: var(--primary); background: var(--primary-soft); font-weight: 700; }
 .wb-tip { font-size: 12.5px; color: var(--text-soft); margin-bottom: 10px; display: flex; align-items: center; gap: 8px; }
 .review-answer {

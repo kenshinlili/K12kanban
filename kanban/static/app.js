@@ -17,12 +17,12 @@ const STATUS_TEXT = {
 };
 
 /* ---------- utils ---------- */
-function toast(msg) {
+function toast(msg, ms) {
   const t = document.getElementById('toast');
   t.textContent = msg;
   t.classList.add('show');
   clearTimeout(toast._t);
-  toast._t = setTimeout(() => t.classList.remove('show'), 2200);
+  toast._t = setTimeout(() => t.classList.remove('show'), ms || 2200);
 }
 function esc(s) {
   return (s == null ? '' : String(s)).replace(/[&<>"']/g, c =>
@@ -617,7 +617,12 @@ async function renderPendingAi() {
 
   container.innerHTML = `<div class="pending-ai-header">
     <div class="pending-ai-title">🔍 待 AI 识别 (${items.length})</div>
-    <div class="pending-ai-tip">上传后自动进入此区域，点「开始识别」即可请求 AI 助手处理</div>
+    <div class="pending-ai-tip">
+      <b>两步走：</b>
+      ① 点右侧「📨 通知 AI 助手识别」登记请求 →
+      ② 切到 <b>WorkBuddy 对话窗口</b>说「识别待识别的作业」，AI 处理完会自动进入「待处理」等您审核。
+      <span style="color:var(--text-soft)">（看板本身不跑 AI 模型，所以点按钮不会马上出结果）</span>
+    </div>
   </div>
   <div class="pending-ai-list">${items.map(it => pendingAiCard(it)).join('')}</div>`;
 
@@ -629,7 +634,7 @@ async function renderPendingAi() {
       btn.textContent = '请求中…';
       const r = await post(`/checkin/${cid}/recognize`, { member_id: STATE.member });
       if (r.ok) {
-        toast(r.msg || '识别请求已提交');
+        toast('已登记识别请求。请切到 WorkBuddy 对话窗口说「识别待识别的作业」，AI 处理完会自动进入「待处理」。', 6000);
       } else {
         toast(r.error || '请求失败');
       }
@@ -658,7 +663,8 @@ function pendingAiCard(it) {
       ${it.note ? `<div class="pending-ai-note">📝 ${esc(it.note)}</div>` : ''}
     </div>
     <div class="pending-ai-actions">
-      <button class="btn btn-primary btn-sm" data-pending-ai="${it.id}">▶ 开始识别</button>
+      <button class="btn btn-primary btn-sm" data-pending-ai="${it.id}"
+        title="登记识别请求（看板本身不跑 AI）。识别需切到 WorkBuddy 对话窗口让 AI 助手处理，完成后自动进入「待处理」。">📨 通知 AI 助手识别</button>
       <button class="btn btn-sm" data-pending-open="${it.id}">查看</button>
     </div>
   </div>`;
@@ -1123,7 +1129,7 @@ function formatAnswer(text) {
 }
 
 const REVIEW_STATE_TEXT = {
-  due: '待复习', learning: '复习中', mastered: '复习完成',
+  due: '🔴 该复习', learning: '⚪ 下次到', mastered: '✓ 已掌握',
 };
 const REVIEW_STATE_CLASS = {
   due: 'sp-rerun_requested', learning: 'sp-pending_ai',
@@ -1220,14 +1226,18 @@ async function renderWrongbook() {
   // ---- 检索区 ----
   const subjects = [...new Set(items.map(i => i.subject))];
   html += `<div class="wb-section-title">全部错题检索
-    ${s.date_range ? `<span class="wb-range">${s.date_range[0]} ~ ${s.date_range[1]}</span>` : ''}</div>
+    ${s.date_range ? `<span class="wb-range">${s.date_range[0]} ~ ${s.date_range[1]}</span>` : ''}
+    <button class="btn btn-sm" id="wbResetAll" style="margin-left:auto"
+      title="清空「科目 + 状态 + 知识点」三层筛选，回到全部错题">↺ 重置筛选</button></div>
     <div class="wb-filter">
-    <button class="btn btn-sm wb-f on" data-wb="all">全部 (${items.length})</button>
+    <span class="wb-flabel">科目</span>
+    <button class="btn btn-sm wb-f on" data-wb="all">全科目 (${items.length})</button>
     ${subjects.map(sub => `<button class="btn btn-sm wb-f" data-wb="${esc(sub)}">${esc(sub)} (${items.filter(i => i.subject === sub).length})</button>`).join('')}
     <span class="wb-sep"></span>
-    <button class="btn btn-sm wb-s on" data-wbs="all">不限状态</button>
-    <button class="btn btn-sm wb-s" data-wbs="due">⏰ 待复习</button>
-    <button class="btn btn-sm wb-s" data-wbs="learning">复习中</button>
+    <span class="wb-flabel">状态</span>
+    <button class="btn btn-sm wb-s on" data-wbs="all">不限</button>
+    <button class="btn btn-sm wb-s" data-wbs="due">🔴 该复习</button>
+    <button class="btn btn-sm wb-s" data-wbs="learning">⚪ 下次到</button>
     <button class="btn btn-sm wb-s" data-wbs="mastered">✓ 已掌握</button>
   </div><div id="wbList"></div>`;
   container.innerHTML = html;
@@ -1255,13 +1265,39 @@ async function renderWrongbook() {
   const list = document.getElementById('wbList');
   let fSub = 'all', fState = 'all', fKp = null;
 
+  // 从「知识点热力图」点色块跳来：预置课程筛选（用掉即清，避免下次进错题本还带着）
+  const kf = STATE.data._kp_filter;
+  if (kf && kf.name) {
+    fKp = kf.name;
+    STATE.data._kp_filter = null;
+  }
+
+  // 清空三层筛选（科目 + 状态 + 课程），并让两组按钮高亮回到默认
+  function resetFilters() {
+    fSub = 'all'; fState = 'all'; fKp = null;
+    [[ '[data-wb]', 'wb' ], ['[data-wbs]', 'wbs']].forEach(([sel, key]) => {
+      const els = [...container.querySelectorAll(sel)];
+      els.forEach(x => x.classList.remove('on'));
+      const def = els.find(x => x.dataset[key] === 'all');
+      if (def) def.classList.add('on');
+    });
+    show();
+  }
+
   function show() {
     let arr = items.slice();
     if (fSub !== 'all') arr = arr.filter(i => i.subject === fSub);
     if (fState !== 'all') arr = arr.filter(i => i.review_state === fState);
     if (fKp) arr = arr.filter(i => (i.knowledge_point || '未归类') === fKp);
-    const tip = fKp ? `<div class="wb-tip">筛选：知识点「${esc(fKp)}」
-      <button class="btn btn-sm" id="wbClearKp">清除</button></div>` : '';
+    // 当前生效的筛选条件（科目 › 状态 › 课程，三层叠加展示）
+    const conds = [];
+    if (fSub !== 'all') conds.push(`科目：${esc(fSub)}`);
+    if (fState !== 'all') conds.push(`状态：${REVIEW_STATE_TEXT[fState] || fState}`);
+    if (fKp) conds.push(`课程：${esc(fKp)}`);
+    const tip = conds.length
+      ? `<div class="wb-tip">筛选：${conds.join(' › ')} · 命中 ${arr.length} 题
+          <button class="btn btn-sm" id="wbClearKp">清除全部筛选</button></div>`
+      : '';
     list.innerHTML = tip + (arr.length ? arr.map(q => `
       <div class="wb-item">
         <div class="wb-head">
@@ -1286,7 +1322,7 @@ async function renderWrongbook() {
       </div>`).join('')
       : `<div class="empty" style="padding:22px"><div>没有符合条件的错题</div></div>`);
     const clr = document.getElementById('wbClearKp');
-    if (clr) clr.onclick = () => { fKp = null; show(); };
+    if (clr) clr.onclick = () => resetFilters();
     list.querySelectorAll('[data-wb-reopen]').forEach(btn => {
       btn.onclick = async () => {
         if (!confirm('重新入复习？\n这题将从头开始复习周期（第 1 次 → …）。')) return;
@@ -1314,6 +1350,9 @@ async function renderWrongbook() {
     fKp = b.dataset.wbkp; show();
     document.getElementById('wbList').scrollIntoView({ behavior: 'smooth', block: 'start' });
   });
+  // ↺ 重置筛选：一键清空「科目 + 状态 + 课程」三层
+  const resetBtn = document.getElementById('wbResetAll');
+  if (resetBtn) resetBtn.onclick = () => resetFilters();
 }
 
 async function openQuestionReviewConfig(qid, rid) {
@@ -1624,7 +1663,10 @@ async function renderKnowledge() {
         STATE.data._kp_filter = { board: b, name: n };
         document.querySelector('[data-tab="wrongbook"]').click();
         setTimeout(() => {
-          const btn = document.querySelector(`[data-wb="${b}"]`) || document.querySelector('[data-wb="all"]');
+          // data-wb 的值是「科目」而不是 board_id，先做一次映射再点，否则永远 fallback 到「全科目」
+          const bd = (STATE.data.boards || []).find(x => x.id === b);
+          const sel = bd ? `[data-wb="${bd.subject}"]` : '[data-wb="all"]';
+          const btn = document.querySelector(sel) || document.querySelector('[data-wb="all"]');
           if (btn) btn.click();
         }, 300);
       };
