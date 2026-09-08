@@ -24,7 +24,8 @@ CREATE TABLE IF NOT EXISTS boards (
   org_type TEXT NOT NULL,
   track_mode TEXT NOT NULL,
   sort_order INTEGER DEFAULT 0,
-  no_checkin INTEGER DEFAULT 0
+  no_checkin INTEGER DEFAULT 0,
+  archived INTEGER DEFAULT 0
 );
 
 -- 知识点：两级结构（parent_id 指向一级「单元」，NULL 表示一级或扁平项）
@@ -153,19 +154,16 @@ REVIEW_RULES = [
 ]
 
 BOARDS = [
-    # 语文
+    # 语文：V1.30 看板只保留校内主三卡，学而思体系归档隐藏
     ('cn_school_drill', '语文', '校内精练', '校内', '单元', 1, 0),
     ('cn_dictation', '语文', '听写', '校内', '单元', 2, 0),
     ('cn_essay', '语文', '作文', '校内', '单元', 3, 0),
-    ('cn_xes', '语文', '学而思', '校外', '主题', 4, 0),
-    ('cn_xes_daily', '语文', '天天练', '校外', '每日', 5, 0),
-    ('cn_xes_accumulate', '语文', '日积月累', '校外', '主题', 6, 0),
     # 数学
-    ('math_school', '数学', '校内', '校内', '主题', 7, 0),
-    ('math_outside', '数学', '校外', '校外', '主题', 8, 0),
+    ('math_school', '数学', '校内', '校内', '主题', 4, 0),
+    ('math_outside', '数学', '校外', '校外', '主题', 5, 0),
     # 英语
-    ('en_school', '英语', '校内', '校内', '单元', 9, 0),
-    ('en_outside', '英语', '校外', '校外', '主题', 10, 0),
+    ('en_school', '英语', '校内', '校内', '单元', 6, 0),
+    ('en_outside', '英语', '校外', '校外', '主题', 7, 0),
 ]
 
 # ---------------------------------------------------------------------------
@@ -238,6 +236,13 @@ def migrate_db(conn):
     if 'no_checkin' not in board_cols:
         conn.execute("ALTER TABLE boards ADD COLUMN no_checkin INTEGER DEFAULT 0")
     conn.execute("UPDATE boards SET no_checkin=1 WHERE id='cn_exam'")
+    # V1.30：boards 加 archived（软删除/隐藏），并把语文非主三卡归档
+    if 'archived' not in board_cols:
+        conn.execute("ALTER TABLE boards ADD COLUMN archived INTEGER DEFAULT 0")
+    KEEP_CN_BOARDS = {'cn_school_drill', 'cn_dictation', 'cn_essay'}
+    conn.execute(
+        "UPDATE boards SET archived=1 WHERE subject='语文' AND id NOT IN (?, ?, ?)",
+        tuple(KEEP_CN_BOARDS))
 
     # 2. wrong_questions 加 answer_candidates
     cols = [r['name'] for r in conn.execute('PRAGMA table_info(wrong_questions)').fetchall()]
@@ -478,11 +483,12 @@ def init_db():
             conn.execute(
                 'INSERT OR IGNORE INTO members (id, name, role, avatar, sort_order) '
                 'VALUES (?, ?, ?, ?, ?)', m)
-        # 种子板块
+        # 种子板块（V1.30：新板块默认未归档）
         for b in BOARDS:
             conn.execute(
-                'INSERT OR IGNORE INTO boards (id, subject, name, org_type, track_mode, sort_order, no_checkin) '
-                'VALUES (?, ?, ?, ?, ?, ?, ?)', b)
+                'INSERT OR IGNORE INTO boards '
+                '(id, subject, name, org_type, track_mode, sort_order, no_checkin, archived) '
+                'VALUES (?, ?, ?, ?, ?, ?, ?, 0)', b)
         # 种子知识点：两级板块 + 扁平板块
         for board_id, tree in TREE_KNOWLEDGE.items():
             _seed_tree(conn, board_id, tree)
@@ -512,10 +518,11 @@ def ensure_exam_knowledge(conn):
     EXAM_BOARD = ('cn_exam', '语文', '考试和测验', '校内', '单元', 5, 1)
     EXAM_NAME = '考试和测验'
     conn.execute(
-        'INSERT OR IGNORE INTO boards (id, subject, name, org_type, track_mode, sort_order, no_checkin) '
-        'VALUES (?, ?, ?, ?, ?, ?, ?)', EXAM_BOARD)
-    # 确保考试板块标记为「无需打卡」
-    conn.execute("UPDATE boards SET no_checkin=1 WHERE id='cn_exam'")
+        'INSERT OR IGNORE INTO boards '
+        '(id, subject, name, org_type, track_mode, sort_order, no_checkin, archived) '
+        'VALUES (?, ?, ?, ?, ?, ?, ?, 1)', EXAM_BOARD)
+    # 确保考试板块标记为「无需打卡」且归档（V1.30 语文看板只保留三个主卡片）
+    conn.execute("UPDATE boards SET no_checkin=1, archived=1 WHERE id='cn_exam'")
 
     # 语文「单元制」板块下的一级知识点（单元）按名字去重，作为建考试项的基准。
     # 只取 track_mode='单元' 且不是考试板块本身，避免把扁平板块的顶层知识点也当成单元。

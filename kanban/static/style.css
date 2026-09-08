@@ -183,6 +183,7 @@ body {
   gap: 8px;
 }
 .subject-title .dot { width: 9px; height: 9px; border-radius: 50%; }
+.subject-title .btn-add-board { margin-left: auto; font-size: 12px; padding: 4px 10px; }
 .dot.cn { background: var(--primary); }
 .dot.math { background: var(--purple); }
 .dot.en { background: var(--success); }
@@ -899,6 +900,20 @@ body {
   padding: 12px 18px; border-top: 1px solid var(--border);
   display: flex; justify-content: flex-end; gap: 10px;
 }
+
+/* ---------- 添加新卡片弹窗（V1.30） ---------- */
+.ab-modal-mask {
+  position: fixed; inset: 0; background: rgba(15, 23, 42, .5);
+  opacity: 0; pointer-events: none; transition: opacity .2s; z-index: 130;
+}
+.ab-modal-mask.show { opacity: 1; pointer-events: auto; }
+.ab-modal {
+  position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%) scale(.96);
+  width: min(420px, 94vw); max-height: 86vh; background: #fff;
+  border-radius: 14px; box-shadow: var(--shadow-lg); z-index: 131;
+  display: flex; flex-direction: column; opacity: 0; pointer-events: none; transition: all .2s;
+}
+.ab-modal.show { opacity: 1; transform: translate(-50%, -50%) scale(1); pointer-events: auto; }
 
 /* ---------- V1.21 知识点作业历史弹层 ----------
    层级 125/126：低于「上传作业」弹窗(130/131)，所以在里面点「上传新作业」能盖上来 */

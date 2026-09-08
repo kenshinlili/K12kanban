@@ -76,6 +76,7 @@
       <span class="review-modal-sub" id="reviewModalMeta">2026-09-04 · 2 张照片 · 3 题待审</span>
     </div>
     <div class="review-modal-actions">
+      <button class="btn btn-success btn-sm" id="btnReviewFinalize" title="全部处理完后，手动确认入库并安排复习">✓ 审核完成并入库</button>
       <button class="btn btn-sm" id="btnRerunAll" title="整批打回：让 AI 重新看照片识别全部题目。适合 AI 漏题、整页没识别出来的情况。当前审核结果会归档为历史版本，AI 重跑后回到待审。">🔄 全部重新识别</button>
       <button class="btn btn-sm" id="btnPrintPreview" title="只显示题目，隐藏答案，方便打印">🖨 打印版预览</button>
       <button class="btn btn-sm" id="btnCloseReviewModal">关闭</button>
@@ -165,6 +166,45 @@
   <div class="hw-modal-footer">
     <button class="btn" id="btnCloseKpHw2">关闭</button>
     <button class="btn btn-primary" id="btnKpHwUpload">📤 上传新作业</button>
+  </div>
+</div>
+
+<!-- 添加新卡片弹窗（V1.30） -->
+<div class="ab-modal-mask" id="addBoardMask"></div>
+<div class="ab-modal" id="addBoardModal">
+  <div class="hw-modal-header">
+    <h3 id="addBoardTitle">＋ 添加卡片</h3>
+    <button class="icon-btn" id="btnCloseAddBoard">✕</button>
+  </div>
+  <div class="hw-modal-body">
+    <div class="field">
+      <label>卡片名称</label>
+      <input type="text" id="addBoardName" placeholder="如：学而思天天练">
+    </div>
+    <div class="field">
+      <label>来源</label>
+      <select id="addBoardOrg">
+        <option value="校内">校内</option>
+        <option value="校外">校外</option>
+      </select>
+    </div>
+    <div class="field">
+      <label>跟踪方式</label>
+      <select id="addBoardTrack">
+        <option value="单元">单元</option>
+        <option value="主题">主题</option>
+        <option value="每日">每日</option>
+      </select>
+    </div>
+    <div class="field">
+      <label>
+        <input type="checkbox" id="addBoardNoCheckin"> 无需每日打卡（只传作业）
+      </label>
+    </div>
+  </div>
+  <div class="hw-modal-footer">
+    <button class="btn" id="btnCancelAddBoard">取消</button>
+    <button class="btn btn-primary" id="btnSubmitAddBoard">添加</button>
   </div>
 </div>
 

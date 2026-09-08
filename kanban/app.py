@@ -269,7 +269,7 @@ def api_state():
         members = [row2dict(r) for r in conn.execute(
             'SELECT * FROM members ORDER BY sort_order').fetchall()]
         boards = [row2dict(r) for r in conn.execute(
-            'SELECT * FROM boards ORDER BY sort_order').fetchall()]
+            'SELECT * FROM boards WHERE archived=0 ORDER BY sort_order').fetchall()]
 
         for b in boards:
             # V1.21：archived = 已取消的打卡，不算今日完成（但记录保留，照片识别都在）
@@ -331,6 +331,7 @@ def api_state():
             SELECT c.*, b.subject, b.name AS board_name
             FROM checkins c JOIN boards b ON c.board_id = b.id
             WHERE c.status IN ('pending_review','transferred','rerun_requested')
+              AND b.archived=0
             ORDER BY c.updated_at DESC LIMIT 30
         ''').fetchall()
         for r in rows:
@@ -350,6 +351,7 @@ def api_state():
             SELECT c.*, b.subject, b.name AS board_name
             FROM checkins c JOIN boards b ON c.board_id = b.id
             WHERE c.status = 'pending_ai' AND c.entry_type = 'homework'
+              AND b.archived=0
             ORDER BY c.created_at DESC LIMIT 50
         ''').fetchall()
         for r in rows:
@@ -1705,7 +1707,7 @@ def api_knowledge_heatmap():
     conn = db.get_conn()
     try:
         boards = [row2dict(r) for r in conn.execute(
-            'SELECT * FROM boards ORDER BY subject, sort_order').fetchall()]
+            'SELECT * FROM boards WHERE archived=0 ORDER BY subject, sort_order').fetchall()]
         kps = [row2dict(r) for r in conn.execute(
             'SELECT * FROM knowledge_points ORDER BY sort_order').fetchall()]
         kp_by_board = {}
@@ -1727,7 +1729,7 @@ def api_knowledge_heatmap():
               ON lr.checkin_id = c.id AND lr.mv = r.version
             LEFT JOIN review_schedules s ON s.wrong_question_id = q.id
             LEFT JOIN review_rules rr ON rr.subject = b.subject
-            WHERE q.status='confirmed'
+            WHERE q.status='confirmed' AND b.archived=0
         ''').fetchall()]
 
         today = db.today_str()
@@ -1857,7 +1859,7 @@ def api_study_plan():
             FROM wrong_questions q
             JOIN checkins c ON q.checkin_id = c.id
             JOIN boards b ON c.board_id = b.id
-            WHERE q.status='confirmed'
+            WHERE q.status='confirmed' AND b.archived=0
               AND q.knowledge_point IS NOT NULL AND q.knowledge_point != ''
             GROUP BY b.subject, b.name, q.knowledge_point
             ORDER BY cnt DESC LIMIT 8
@@ -2084,6 +2086,79 @@ def api_kps_homeworks():
 
 # ---------------- 历史 / 统计 ----------------
 
+@app.route('/api/boards', methods=['POST'])
+def api_create_board():
+    """V1.30：在看板面板直接添加新卡片。"""
+    data = request.get_json() or {}
+    subject = (data.get('subject') or '').strip()
+    name = (data.get('name') or '').strip()
+    if not subject or not name:
+        return jsonify({'ok': False, 'error': '科目和卡片名称不能为空'}), 400
+    if subject not in ('语文', '数学', '英语'):
+        return jsonify({'ok': False, 'error': '科目必须是 语文/数学/英语 之一'}), 400
+    org_type = (data.get('org_type') or '校外').strip()
+    track_mode = (data.get('track_mode') or '主题').strip()
+    no_checkin = 1 if data.get('no_checkin') else 0
+    prefix = {'语文': 'cn', '数学': 'math', '英语': 'en'}.get(subject, 'b')
+    board_id = f"{prefix}_{uuid.uuid4().hex[:8]}"
+    conn = db.get_conn()
+    try:
+        mx = conn.execute(
+            'SELECT COALESCE(MAX(sort_order),0) AS m FROM boards WHERE subject=?',
+            (subject,)).fetchone()['m']
+        conn.execute(
+            'INSERT INTO boards (id, subject, name, org_type, track_mode, sort_order, no_checkin, archived) '
+            'VALUES (?, ?, ?, ?, ?, ?, ?, 0)',
+            (board_id, subject, name, org_type, track_mode, mx + 1, no_checkin))
+        conn.commit()
+        return jsonify({'ok': True, 'board': {
+            'id': board_id, 'subject': subject, 'name': name,
+            'org_type': org_type, 'track_mode': track_mode,
+            'sort_order': mx + 1, 'no_checkin': no_checkin, 'archived': 0,
+        }})
+    finally:
+        conn.close()
+
+
+@app.route('/api/board/<board_id>', methods=['PATCH', 'DELETE'])
+def api_update_board(board_id):
+    """V1.30：修改/归档/恢复卡片。DELETE 是软删除（archived=1）。"""
+    conn = db.get_conn()
+    try:
+        board = conn.execute('SELECT * FROM boards WHERE id=?', (board_id,)).fetchone()
+        if not board:
+            return jsonify({'ok': False, 'error': '卡片不存在'}), 404
+        if request.method == 'DELETE':
+            conn.execute('UPDATE boards SET archived=1 WHERE id=?', (board_id,))
+            conn.commit()
+            return jsonify({'ok': True, 'archived': True})
+        data = request.get_json() or {}
+        updates = []
+        params = []
+        if 'name' in data:
+            updates.append('name=?')
+            params.append(data['name'].strip())
+        if 'org_type' in data:
+            updates.append('org_type=?')
+            params.append(data['org_type'].strip())
+        if 'track_mode' in data:
+            updates.append('track_mode=?')
+            params.append(data['track_mode'].strip())
+        if 'archived' in data:
+            updates.append('archived=?')
+            params.append(1 if data['archived'] else 0)
+        if 'no_checkin' in data:
+            updates.append('no_checkin=?')
+            params.append(1 if data['no_checkin'] else 0)
+        if updates:
+            params.append(board_id)
+            conn.execute(f"UPDATE boards SET {','.join(updates)} WHERE id=?", params)
+            conn.commit()
+        return jsonify({'ok': True})
+    finally:
+        conn.close()
+
+
 @app.route('/api/board/<board_id>/history')
 def api_board_history(board_id):
     conn = db.get_conn()
@@ -2247,7 +2322,7 @@ def api_review_today():
             JOIN wrong_questions q ON s.wrong_question_id = q.id
             JOIN checkins c ON q.checkin_id = c.id
             JOIN boards b ON c.board_id = b.id
-            WHERE s.status='pending' AND s.next_review_date <= ?
+            WHERE s.status='pending' AND s.next_review_date <= ? AND b.archived=0
         '''
         params = [today]
         if subject:
@@ -2386,6 +2461,7 @@ def api_review_stats():
             JOIN wrong_questions q ON s.wrong_question_id=q.id
             JOIN checkins c ON q.checkin_id=c.id
             JOIN boards b ON c.board_id=b.id
+            WHERE b.archived=0
         '''
         totals = conn.execute(agg_sql, (today, today)).fetchone()
         due = totals['due'] or 0

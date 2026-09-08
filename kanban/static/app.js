@@ -175,7 +175,10 @@ function renderKanban() {
   SUBJECT_ORDER.forEach(sub => {
     if (!groups[sub]) return;
     html += `<div class="subject-group">
-      <div class="subject-title"><span class="dot ${SUBJECT_CLASS[sub]}"></span>${sub}</div>
+      <div class="subject-title">
+        <span class="dot ${SUBJECT_CLASS[sub]}"></span>${sub}
+        <button class="btn btn-sm btn-add-board" data-add-subject="${sub}" title="在${sub}下添加新卡片">＋ 卡片</button>
+      </div>
       <div class="board-grid">${groups[sub].map(boardCard).join('')}</div>
     </div>`;
   });
@@ -212,6 +215,13 @@ function renderKanban() {
   });
   const hwUploadBtn = container.querySelector('#btnUploadHomework');
   if (hwUploadBtn) hwUploadBtn.onclick = () => openHomeworkModal(null);
+  // V1.30：学科标题旁添加新卡片
+  container.querySelectorAll('[data-add-subject]').forEach(btn => {
+    btn.onclick = e => {
+      e.stopPropagation();
+      openAddBoardModal(btn.dataset.addSubject);
+    };
+  });
 }
 
 /* 每日打卡：只记录完成时间，不强制选知识点/照片 */
@@ -406,6 +416,44 @@ function closeHomeworkModal() {
   document.getElementById('hwModal').classList.remove('show');
   document.getElementById('hwModalMask').classList.remove('show');
   HW_PHOTOS = [];
+}
+
+/* ---------- 添加新卡片弹窗（V1.30） ---------- */
+let ADD_BOARD_SUBJECT = null;
+
+function openAddBoardModal(subject) {
+  ADD_BOARD_SUBJECT = subject;
+  document.getElementById('addBoardTitle').textContent = `＋ 添加「${subject}」卡片`;
+  document.getElementById('addBoardName').value = '';
+  document.getElementById('addBoardOrg').value = '校外';
+  document.getElementById('addBoardTrack').value = '主题';
+  document.getElementById('addBoardNoCheckin').checked = false;
+  document.getElementById('addBoardModal').classList.add('show');
+  document.getElementById('addBoardMask').classList.add('show');
+  document.getElementById('addBoardName').focus();
+}
+
+function closeAddBoardModal() {
+  ADD_BOARD_SUBJECT = null;
+  document.getElementById('addBoardModal').classList.remove('show');
+  document.getElementById('addBoardMask').classList.remove('show');
+}
+
+async function submitAddBoard() {
+  const name = document.getElementById('addBoardName').value.trim();
+  if (!name) { toast('请输入卡片名称'); return; }
+  const r = await post('/boards', {
+    subject: ADD_BOARD_SUBJECT,
+    name: name,
+    org_type: document.getElementById('addBoardOrg').value,
+    track_mode: document.getElementById('addBoardTrack').value,
+    no_checkin: document.getElementById('addBoardNoCheckin').checked,
+  });
+  if (!r.ok) { toast(r.error || '添加失败'); return; }
+  toast('✓ 已添加卡片');
+  closeAddBoardModal();
+  await loadState();
+  renderKanban();
 }
 
 /* ---------- 知识点作业历史弹层（V1.21）----------
@@ -1685,6 +1733,17 @@ async function renderDrawer() {
     </div>`;
   }
 
+  /* 板块管理（V1.30：删除/归档必须进抽屉操作） */
+  html += `<div class="section">
+    <h3>⚙️ 板块管理</h3>
+    <p style="font-size:12px;color:var(--text-soft);margin:0 0 8px">
+      归档后该卡片会从看板隐藏，历史作业和错题仍保留。
+    </p>
+    <button class="btn btn-danger btn-sm" id="btnArchiveBoard" style="width:100%">
+      🗑 归档「${esc(b.name)}」卡片
+    </button>
+  </div>`;
+
   /* 时间线 */
   html += `<div class="section">
     <h3>📜 操作记录</h3>
@@ -1870,6 +1929,20 @@ function bindDrawerEvents() {
     };
   });
 
+  /* 归档板块 */
+  const btnArchiveBoard = document.getElementById('btnArchiveBoard');
+  if (btnArchiveBoard) btnArchiveBoard.onclick = async () => {
+    const b = CURRENT_BOARD;
+    if (!b) return;
+    if (!confirm(`确定归档「${b.name}」卡片？\n该卡片会从看板隐藏，但历史作业和错题仍保留，之后可通过添加卡片恢复。`)) return;
+    const r = await del(`/board/${b.id}`);
+    if (!r.ok) { toast(r.error || '归档失败'); return; }
+    toast('已归档卡片');
+    closeDrawer();
+    await loadState();
+    renderKanban();
+  };
+
   /* 审核完成 */
   const btnFinalize = document.getElementById('btnFinalize');
   if (btnFinalize) btnFinalize.onclick = async () => {
@@ -2012,6 +2085,19 @@ document.addEventListener('DOMContentLoaded', () => {
       for (const f of e.target.files) HW_PHOTOS.push(f);
       renderHwPhotoPreview();
       e.target.value = '';
+    };
+  }
+
+  // 添加新卡片弹窗（V1.30）
+  const addBoardModal = document.getElementById('addBoardModal');
+  const addBoardMask = document.getElementById('addBoardMask');
+  if (addBoardModal && addBoardMask) {
+    document.getElementById('btnCloseAddBoard').onclick = closeAddBoardModal;
+    document.getElementById('btnCancelAddBoard').onclick = closeAddBoardModal;
+    addBoardMask.onclick = closeAddBoardModal;
+    document.getElementById('btnSubmitAddBoard').onclick = submitAddBoard;
+    document.getElementById('addBoardName').onkeydown = e => {
+      if (e.key === 'Enter') submitAddBoard();
     };
   }
 
@@ -2468,6 +2554,25 @@ function renderReviewModal() {
   document.getElementById('btnPrintPreview').onclick = () => openPrintModal(questions);
   document.getElementById('btnCloseReviewModal').onclick = closeReviewModal;
   document.getElementById('reviewModalMask').onclick = closeReviewModal;
+  const btnReviewFinalize = document.getElementById('btnReviewFinalize');
+  if (btnReviewFinalize) {
+    const pendingInModal = questions.filter(q => q.status === 'pending' || q.status === 'rerun_requested').length;
+    btnReviewFinalize.disabled = pendingInModal > 0;
+    btnReviewFinalize.title = pendingInModal > 0
+      ? `还有 ${pendingInModal} 题未处理，请先确认或删除`
+      : '全部错题已处理，点击入库并安排复习';
+    btnReviewFinalize.onclick = async () => {
+      const checkin = REVIEW_MODAL_DATA.checkin;
+      if (!checkin) return;
+      const r = await post(`/checkin/${checkin.id}/finalize`, { member_id: STATE.member });
+      if (!r.ok) { toast('审核完成失败：' + (r.error || '未知')); return; }
+      toast('✓ 已审核完成并入库');
+      closeReviewModal();
+      closeDrawer();
+      await loadState();
+      render();
+    };
+  }
 
   // 整批打回重识别：AI 漏题时用（单题打回不够）
   // ——用内联表单代替 window.prompt()，保证左侧照片永远可见，方便对照原图写意见
