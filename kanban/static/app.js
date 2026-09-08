@@ -2700,7 +2700,7 @@ function undoReviewModalBlank() {
   applyQuestionSnapshot(record.idx, record.before);
   REVIEW_MODAL_LAST_IDX = record.idx;
   updateUndoBlankButtons();
-  toast('↩ 已撤销一键整理');
+  toast('↩ 已撤销挖空');
 }
 
 function redoReviewModalBlank() {
@@ -2764,7 +2764,16 @@ function renderReviewModal() {
   }
 
   let html = `<div class="rqe-print-hint">
-    💡 <b>使用提示</b>：左侧看原图，右侧改识别结果。「题目原文」必须从照片中原样提取印刷字，不要改写；「正确答案」可由 AI 给出候选，家长选择或手动修改；「学生当时写的答案」可选填。
+    💡 <b>使用提示</b>：左侧看原图，右侧改识别结果。
+    <ul style="margin:6px 0 0 18px;padding:0;line-height:1.7">
+      <li><b>「题目原文」必须 100% 原文</b>：1 个字不改、不归纳、不总结、
+          <b>保留题号</b>（1. / 2. / （1））、<b>原题里没有的拼音不要加</b>。
+          详见 <code>_Wiki/overview/AI识别规则.md</code></li>
+      <li><b>「正确答案」</b>：可由 AI 给出候选，家长选择或手动修改</li>
+      <li><b>「学生当时写的答案」</b>：可选填，用于了解孩子错在哪里</li>
+      <li><b>「⬜ 打印前挖空答案」</b>：<b>只在打印前</b>用，把答案处挖空为 ______ 方便孩子重做，
+          <b>不动原文</b>，可按 Ctrl+Z 撤销。不要在审核阶段使用</li>
+    </ul>
   </div>`;
 
   questions.forEach((q, idx) => {
@@ -2776,7 +2785,9 @@ function renderReviewModal() {
         <div><span class="rqe-num">${idx + 1}</span> <span class="rqe-status">${stateText}</span></div>
       </div>
       <div class="rqe-field">
-        <label>题目原文（必须从照片中原样提取印刷体，不要改写）<span class="tip">可编辑 · 一键整理后可按 Ctrl+Z 撤销</span></label>
+        <label>题目原文 · <b style="color:var(--danger)">100% 原文</b>（1 字不改 · 不归纳 · 不总结 ·
+          <b>保留题号</b> · <b>原题里没的拼音不要加</b>）
+          <span class="tip">可编辑 · 挖空后可按 Ctrl+Z 撤销</span></label>
         <textarea id="rqe-content-${idx}">${esc(q.content)}</textarea>
       </div>
       <div class="rqe-field rqe-optional">
@@ -2803,8 +2814,8 @@ function renderReviewModal() {
         <button class="btn btn-success" data-ract="confirm" data-qidx="${idx}" title="确认这题是对的（不改 AI 识别结果，或保存你改完的结果），确认后进入错题本并安排复习">✓ 确认错题</button>
         <button class="btn btn-danger" data-ract="delete" data-qidx="${idx}" title="这题不是错题 / 不需要，直接删除（不可恢复）">🗑 删除</button>
         <button class="btn btn-sm" data-ract="rerun" data-qidx="${idx}" title="让 AI 重新看照片识别这题（会进入待重识别队列，等外部 AI 回填）。单题漏识别用这个，整批漏题请用顶部「🔄 全部重新识别」">🔄 重新识别</button>
-        <button class="btn btn-sm" data-ract="blank" data-qidx="${idx}" title="OCR 输出常带括号答案（如「潮来时的情景」），此按钮一键把答案与学生作答处替换为 ______，方便打印给孩子重做。手动改具体文字请直接编辑「题目原文」框">⬜ 一键整理为印刷体</button>
-        <button class="btn btn-sm undo-blank-btn" data-ract="undoBlank" data-qidx="${idx}" style="display:none" title="撤销刚才的一键整理（同 Ctrl+Z）">↩ 撤销整理</button>
+        <button class="btn btn-sm" data-ract="blank" data-qidx="${idx}" title="【只在打印前用】把答案与学生作答处替换为 ______，方便打印给孩子重做。注意：这是生成打印副本，不会改动已保存的原文（可按 Ctrl+Z 或「↩ 撤销整理」回退）。识别阶段请严格遵守 100% 原文，不要用这个按钮代替识别。手动改具体文字请直接编辑「题目原文」框">⬜ 打印前挖空答案</button>
+        <button class="btn btn-sm undo-blank-btn" data-ract="undoBlank" data-qidx="${idx}" style="display:none" title="撤销刚才的挖空（同 Ctrl+Z）">↩ 撤销挖空</button>
       </div>
       ${q.review_comment ? `<div class="wq-comment">💬 ${esc(q.review_comment)}</div>` : ''}
     </div>`;
